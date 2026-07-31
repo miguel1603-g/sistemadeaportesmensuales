@@ -54,6 +54,8 @@ interface Client {
   fechaPrimerPago: string;
   vencidasExcel?: number;
   valorEntrada?: number;
+  porcentajeEntrada?: number;
+  fechaPagoEntrada?: string;
 }
 
 interface MoraParam {
@@ -116,6 +118,7 @@ export default function App() {
     id: '', nombres: '', docIdentidad: '', ejecutivoCartera: '', puesto: '', tipoPlan: 'Compra Planificada',
     estadoActivo: 'ACTIVO', grupoCodigo: '', estadoPlan: 'No Adjudicado', montoContratado: 0,
     valorInscripcion: 0, plazoPlan: 12, valorCuota: 0, cuotasPagadas: 0, valorTotalPagado: 0,
+    porcentajeEntrada: 0, fechaPagoEntrada: '', valorEntrada: 0
   });
 
   const [showMulticuotas, setShowMulticuotas] = useState(false);
@@ -234,6 +237,7 @@ export default function App() {
       id: Date.now().toString(), nombres: '', docIdentidad: '', ejecutivoCartera: '', puesto: '', tipoPlan: 'Compra Planificada',
       estadoActivo: 'ACTIVO', grupoCodigo: '', estadoPlan: 'No Adjudicado', montoContratado: 0, valorInscripcion: 0,
       plazoPlan: 12, valorCuota: 0, cuotasPagadas: 0, valorTotalPagado: 0, fechaPrimerPago: new Date().toISOString().split('T')[0],
+      porcentajeEntrada: 0, fechaPagoEntrada: '', valorEntrada: 0, fechaEntrega: ''
     });
     switchTab('client-info');
   };
@@ -245,7 +249,7 @@ export default function App() {
   };
 
   const clearForm = () => {
-    setFormData({ id: '', nombres: '', docIdentidad: '', ejecutivoCartera: '', puesto: '', tipoPlan: 'Compra Planificada', estadoActivo: 'ACTIVO', grupoCodigo: '', estadoPlan: 'No Adjudicado', montoContratado: 0, valorInscripcion: 0, plazoPlan: 12, valorCuota: 0, cuotasPagadas: 0, valorTotalPagado: 0, fechaPrimerPago: '' });
+    setFormData({ id: '', nombres: '', docIdentidad: '', ejecutivoCartera: '', puesto: '', tipoPlan: 'Compra Planificada', estadoActivo: 'ACTIVO', grupoCodigo: '', estadoPlan: 'No Adjudicado', montoContratado: 0, valorInscripcion: 0, plazoPlan: 12, valorCuota: 0, cuotasPagadas: 0, valorTotalPagado: 0, fechaPrimerPago: '', porcentajeEntrada: 0, fechaPagoEntrada: '', valorEntrada: 0, fechaEntrega: '' });
   };
 
   const calculateValues = () => {
@@ -291,6 +295,7 @@ export default function App() {
       formaAdjudicacion: formData.formaAdjudicacion || '',
       fechaAdjudicacion: formData.fechaAdjudicacion || '',
       numeroAsamblea: formData.numeroAsamblea || '',
+      fechaEntrega: formData.fechaEntrega || '',
       montoContratado: Number(formData.montoContratado || 0),
       valorInscripcion: Number(formData.valorInscripcion || 0),
       plazoPlan: Number(formData.plazoPlan || 12),
@@ -299,19 +304,43 @@ export default function App() {
       valorTotalPagado: Number(formData.cuotasPagadas || 0) * Number(formData.valorCuota || 0),
       fechaPrimerPago: formData.fechaPrimerPago || new Date().toISOString().split('T')[0],
       valorEntrada: Number(formData.valorEntrada || 0),
+      porcentajeEntrada: Number(formData.porcentajeEntrada || 0),
+      fechaPagoEntrada: formData.fechaPagoEntrada || '',
     };
 
     setClients((prev) => {
-      const idx = prev.findIndex((c) => c.id === newClientObj.id);
+      // 1. Buscamos primero por el ID exacto (Flujo normal de edición)
+      let idx = prev.findIndex((c) => c.id === newClientObj.id);
+
+      // 2. PROTECCIÓN CONTRA DUPLICADOS: Si no coincide por ID, verificamos por número de Cédula.
+      // Así evitamos que se duplique un cliente si se crea manualmente con una cédula existente.
+      if (idx === -1) {
+        const idxCedula = prev.findIndex((c) => c.docIdentidad === newClientObj.docIdentidad);
+        if (idxCedula >= 0) {
+          idx = idxCedula;
+          // Forzamos a mantener el ID del registro original que estamos sobreescribiendo
+          newClientObj.id = prev[idx].id; 
+        }
+      }
+
       let newClients;
-      if (idx >= 0) { const copy = [...prev]; copy[idx] = newClientObj; newClients = copy; }
-      else { newClients = [...prev, newClientObj]; }
+      if (idx >= 0) { 
+        // Si lo encontró (por ID o por Cédula), lo actualiza
+        const copy = [...prev]; 
+        copy[idx] = newClientObj; 
+        newClients = copy; 
+      }
+      else { 
+        // Solo si no existe de ninguna forma, crea uno nuevo
+        newClients = [...prev, newClientObj]; 
+      }
+      
       syncToFirebase({ clients: newClients }); 
       return newClients;
     });
 
     setActiveClientId(newClientObj.id);
-    showToast('Cliente guardado exitosamente en la nube.', 'success');
+    showToast('Cliente guardado/actualizado exitosamente en la nube.', 'success');
     if (goToTable) switchTab('payment-table');
     else switchTab('dashboard');
   };
@@ -402,23 +431,30 @@ export default function App() {
           let rawPuesto = row[1] !== undefined ? String(row[1]) : getCol(['puesto', 'cargo']);
           let puestoExcel = formatearPuesto(rawPuesto);
           
-          let montoExcel = row[6] !== undefined ? cleanNumber(row[6]) : cleanNumber(getCol(['monto', 'contratado']));
-          if (montoExcel <= 0) montoExcel = 10000;
+          // FORZAR LECTURA COLUMNA G (Índice 6 - Monto) - ESTRICTO A CERO SI ESTÁ VACÍO
+          let montoExcel = 0;
+          if (row[6] !== undefined && row[6] !== null && String(row[6]).trim() !== '') {
+              montoExcel = cleanNumber(row[6]);
+          } else {
+              const colFallback = getCol(['monto', 'contratado']);
+              montoExcel = colFallback ? cleanNumber(colFallback) : 0;
+          }
+          if (isNaN(montoExcel) || montoExcel < 0) montoExcel = 0; 
 
-          let cuotaExcel = row[7] !== undefined ? cleanNumber(row[7]) : cleanNumber(getCol(['cuota', 'mensual']));
-          if (cuotaExcel <= 0) cuotaExcel = 200; 
+          // FORZAR LECTURA COLUMNA H (Índice 7 - Cuota) - ESTRICTO A CERO SI ESTÁ VACÍO
+          let cuotaExcel = 0;
+          if (row[7] !== undefined && row[7] !== null && String(row[7]).trim() !== '') {
+              cuotaExcel = cleanNumber(row[7]);
+          } else {
+              const colFallback = getCol(['cuota', 'mensual']);
+              cuotaExcel = colFallback ? cleanNumber(colFallback) : 0;
+          }
+          if (isNaN(cuotaExcel) || cuotaExcel <= 0) cuotaExcel = 0; 
 
           // EXTRACCIÓN ESTRICTA DE LA CÉDULA (Columna L = Índice 11)
-          // Obligamos al sistema a leer la Columna L primero.
           let docExcel = row[11] !== undefined && String(row[11]).trim() !== '' 
             ? String(row[11]).trim() 
-            : '';
-            
-          // Quitamos palabras como 'doc' o 'documento' del respaldo para evitar
-          // que lea columnas como "Documentos entregados (0-3)" por accidente.
-          if (!docExcel) {
-            docExcel = getCol(['cedula', 'identificaci', 'c.i']);
-          }
+            : getCol(['cedula', 'identificaci', 'c.i']);
           
           if (!docExcel) {
              docExcel = `9999999${index}`;
@@ -951,25 +987,75 @@ export default function App() {
               </div>
               <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-200 pb-2">Detalles del Plan</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-4">
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Tipo</label><select value={formData.tipoPlan || 'Compra Planificada'} onChange={(e) => setFormData({ ...formData, tipoPlan: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white"><option value="Compra Planificada">Compra Planificada</option><option value="Adjudicación Planificada">Adjudicación Planificada</option></select></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Grupo/Código</label><input type="text" value={formData.grupoCodigo || ''} onChange={(e) => setFormData({ ...formData, grupoCodigo: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Estado General</label><select value={formData.estadoPlan || 'No Adjudicado'} onChange={(e) => setFormData({ ...formData, estadoPlan: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white"><option value="No Adjudicado">No Adjudicado</option><option value="Adjudicado">Adjudicado</option></select></div>
+                  <div><label className="block text-sm font-bold text-slate-700 mb-1">Estado del Plan</label><select value={formData.estadoActivo || 'ACTIVO'} onChange={(e) => setFormData({ ...formData, estadoActivo: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white"><option value="ACTIVO">ACTIVO</option><option value="INACTIVO">INACTIVO</option><option value="LIQUIDADO">LIQUIDADO</option></select></div>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div><label className="block text-sm font-bold text-slate-700 mb-1">F. Adjudicación</label><input type="date" value={formData.fechaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, fechaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white" /></div>
-                  <div><label className="block text-sm font-bold text-slate-700 mb-1">Forma Adjudicación</label><input type="text" placeholder="Ej: Oferta, Sorteo..." value={formData.formaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, formaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
-                  <div><label className="block text-sm font-bold text-slate-700 mb-1"># Asamblea</label><input type="text" value={formData.numeroAsamblea || ''} onChange={(e) => setFormData({ ...formData, numeroAsamblea: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
-                </div>
+                {formData.estadoPlan === 'Adjudicado' && (
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6 border-t border-slate-200 pt-4 mt-4">
+                    <div><label className="block text-sm font-bold text-slate-700 mb-1">F. Adjudicación</label><input type="date" value={formData.fechaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, fechaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white" /></div>
+                    <div><label className="block text-sm font-bold text-slate-700 mb-1">Forma Adjudicación</label><input type="text" placeholder="Ej: Oferta, Sorteo..." value={formData.formaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, formaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
+                    <div><label className="block text-sm font-bold text-slate-700 mb-1"># Asamblea</label><input type="text" value={formData.numeroAsamblea || ''} onChange={(e) => setFormData({ ...formData, numeroAsamblea: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
+                    <div>
+                      <label className="block text-sm font-bold text-emerald-700 mb-1">Fecha de Entrega</label>
+                      <input type="date" value={formData.fechaEntrega || ''} onChange={(e) => setFormData({ ...formData, fechaEntrega: e.target.value })} className="w-full rounded border-emerald-300 p-2 border focus:ring-emerald-500 focus:border-emerald-500 bg-emerald-50 shadow-sm" />
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-200 pb-2">Valores</h3>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                  <div><label className="block text-sm font-bold text-slate-700 mb-1">Monto</label><input type="number" value={formData.montoContratado || ''} onChange={(e) => { setFormData({ ...formData, montoContratado: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Monto Base</label>
+                    <input type="number" value={formData.montoContratado || ''} onChange={(e) => { 
+                      const newMonto = Number(e.target.value);
+                      const pct = Number(formData.porcentajeEntrada || 0);
+                      const newValorEntrada = pct > 0 ? (newMonto * pct) / 100 : Number(formData.valorEntrada || 0);
+                      setFormData({ ...formData, montoContratado: newMonto, valorEntrada: newValorEntrada }); 
+                      calculateValues(); 
+                    }} className="w-full rounded border-slate-300 p-2 border" />
+                  </div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Plazo (Meses)</label><input type="number" value={formData.plazoPlan || ''} onChange={(e) => setFormData({ ...formData, plazoPlan: Number(e.target.value) })} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Cuota</label><input type="number" value={formData.valorCuota || ''} onChange={(e) => { setFormData({ ...formData, valorCuota: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Pagadas</label><input type="number" value={formData.cuotasPagadas || ''} onChange={(e) => { setFormData({ ...formData, cuotasPagadas: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
+                  <div>
+                    <label className="block text-sm font-bold text-blue-800 mb-1">Valor Total del Plan</label>
+                    <div className="w-full rounded border border-blue-300 p-2 bg-blue-50 font-black text-blue-900 shadow-sm flex items-center h-[42px]">
+                      ${(
+                        (Number(formData.valorCuota || 0) * Number(formData.plazoPlan || 0)) + 
+                        (formData.tipoPlan === 'Adjudicación Planificada' ? Number(formData.valorEntrada || 0) : 0)
+                      ).toLocaleString('es-EC', { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
                 </div>
+
+                {formData.tipoPlan === 'Adjudicación Planificada' && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-5 mt-5 border-t border-amber-200 bg-amber-50 p-4 rounded-lg border">
+                    <div>
+                      <label className="block text-sm font-bold text-amber-900 mb-1">% de Entrada (del Monto Base)</label>
+                      <input type="number" step="0.01" value={formData.porcentajeEntrada || ''} onChange={(e) => {
+                        const pct = Number(e.target.value);
+                        const monto = Number(formData.montoContratado || 0);
+                        setFormData({ ...formData, porcentajeEntrada: pct, valorEntrada: (monto * pct) / 100 });
+                      }} className="w-full rounded border-amber-300 p-2 border focus:ring-amber-500 focus:border-amber-500 bg-white shadow-sm" placeholder="Ej: 30" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-amber-900 mb-1">Valor de la Entrada ($)</label>
+                      <input type="number" step="0.01" value={formData.valorEntrada || ''} onChange={(e) => {
+                        const val = Number(e.target.value);
+                        const monto = Number(formData.montoContratado || 0);
+                        setFormData({ ...formData, valorEntrada: val, porcentajeEntrada: monto > 0 ? (val / monto) * 100 : 0 });
+                      }} className="w-full rounded border-amber-300 p-2 border focus:ring-amber-500 focus:border-amber-500 bg-white shadow-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-amber-900 mb-1">Fecha Pago de Entrada</label>
+                      <input type="date" value={formData.fechaPagoEntrada || ''} onChange={(e) => setFormData({ ...formData, fechaPagoEntrada: e.target.value })} className="w-full rounded border-amber-300 p-2 border focus:ring-amber-500 focus:border-amber-500 bg-white shadow-sm" />
+                    </div>
+                  </div>
+                )}
               </div>
             </form>
           </div>
@@ -1106,6 +1192,11 @@ export default function App() {
                     <h3 className="text-sm font-bold text-slate-800 mb-3 pb-2 border-b border-slate-100">Información del Plan</h3>
                     <div className="grid grid-cols-[120px_1fr] gap-y-2 text-xs">
                       <span className="text-slate-500">Tipo de Plan:</span><span>{activeClient.tipoPlan}</span>
+                      {activeClient.tipoPlan === 'Adjudicación Planificada' && (
+                        <>
+                          <span className="text-slate-500">% de Entrada:</span><span className="font-bold text-amber-600">{activeClient.porcentajeEntrada || 0}%</span>
+                        </>
+                      )}
                       <span className="text-slate-500">Estado:</span><span className="font-bold text-emerald-600">{activeClient.estadoPlan} {activeClient.formaAdjudicacion ? `(${activeClient.formaAdjudicacion})` : ''}</span>
                       <span className="text-slate-500">Plazo Contrato:</span><span>{activeClient.plazoPlan} Meses</span>
                       <span className="text-slate-500">F. Adjudicación:</span><span>{activeClient.fechaAdjudicacion ? formatD(activeClient.fechaAdjudicacion) : 'N/A'}</span>
@@ -1114,7 +1205,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="mb-6 grid grid-cols-4 gap-2">
+                <div className="mb-6 grid grid-cols-2 md:grid-cols-5 gap-2">
                   <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 text-center flex flex-col justify-center">
                     <span className="text-[10px] font-bold text-blue-800 uppercase mb-1">MONTO BASE</span>
                     <span className="font-black text-slate-800 text-lg">${activeClient.montoContratado.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
@@ -1127,9 +1218,13 @@ export default function App() {
                     <span className="text-[10px] font-bold text-blue-800 uppercase mb-1">INSCRIPCIÓN</span>
                     <span className="font-black text-slate-800 text-lg">${activeClient.valorInscripcion.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
                   </div>
+                  <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 text-center flex flex-col justify-center">
+                    <span className="text-[10px] font-bold text-amber-600 uppercase mb-1">VALOR ENTRADA</span>
+                    <span className="font-black text-slate-800 text-lg">${(activeClient.valorEntrada || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  </div>
                   <div className="bg-blue-600 rounded-lg p-3 text-center flex flex-col justify-center text-white shadow-md">
                     <span className="text-[10px] font-bold uppercase mb-1">TOTAL PLAN</span>
-                    <span className="font-black text-xl">${(activeClient.valorCuota * activeClient.plazoPlan).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                    <span className="font-black text-xl">${((activeClient.valorCuota * activeClient.plazoPlan) + (activeClient.tipoPlan === 'Adjudicación Planificada' ? (activeClient.valorEntrada || 0) : 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
                   </div>
                 </div>
 
@@ -1233,6 +1328,11 @@ export default function App() {
                     <h3 className="font-bold text-[11px] text-slate-800 border-b border-slate-200 mb-2 pb-1">Información del Plan</h3>
                     <div className="grid grid-cols-[110px_1fr] gap-y-1.5">
                       <span className="text-slate-500">Tipo de Plan:</span><span className="text-slate-800">{activeClient.tipoPlan}</span>
+                      {activeClient.tipoPlan === 'Adjudicación Planificada' && (
+                        <>
+                          <span className="text-slate-500">% de Entrada:</span><span className="font-bold text-amber-700">{activeClient.porcentajeEntrada || 0}%</span>
+                        </>
+                      )}
                       <span className="text-slate-500">Estado:</span><span className="font-bold text-emerald-600">{activeClient.estadoPlan} {activeClient.formaAdjudicacion ? `(${activeClient.formaAdjudicacion})` : ''}</span>
                       <span className="text-slate-500">Plazo Contrato:</span><span className="text-slate-800">{activeClient.plazoPlan} Meses</span>
                       <span className="text-slate-500">F. Adjudicación:</span><span className="text-slate-800">{activeClient.fechaAdjudicacion ? formatD(activeClient.fechaAdjudicacion) : 'N/A'}</span>
@@ -1241,7 +1341,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-4 gap-2 mb-6">
+                <div className="grid grid-cols-5 gap-2 mb-6">
                   <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-center flex flex-col justify-center">
                     <span className="text-[8px] font-bold text-blue-800 uppercase mb-0.5">MONTO BASE</span>
                     <span className="font-black text-slate-800 text-[13px]">${activeClient.montoContratado.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
@@ -1254,9 +1354,13 @@ export default function App() {
                     <span className="text-[8px] font-bold text-blue-800 uppercase mb-0.5">INSCRIPCIÓN</span>
                     <span className="font-black text-slate-800 text-[13px]">${activeClient.valorInscripcion.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
                   </div>
+                  <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-center flex flex-col justify-center">
+                    <span className="text-[8px] font-bold text-amber-600 uppercase mb-0.5">VALOR ENTRADA</span>
+                    <span className="font-black text-slate-800 text-[13px]">${(activeClient.valorEntrada || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  </div>
                   <div className="bg-blue-600 rounded-lg p-2 text-center flex flex-col justify-center text-white">
                     <span className="text-[8px] font-bold uppercase mb-0.5 text-blue-100">TOTAL PLAN</span>
-                    <span className="font-black text-[14px]">${(activeClient.valorCuota * activeClient.plazoPlan).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                    <span className="font-black text-[14px]">${((activeClient.valorCuota * activeClient.plazoPlan) + (activeClient.tipoPlan === 'Adjudicación Planificada' ? (activeClient.valorEntrada || 0) : 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
                   </div>
                 </div>
 
