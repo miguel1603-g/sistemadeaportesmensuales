@@ -29,15 +29,14 @@ try {
   console.error('Error inicializando Firebase:', error);
 }
 
-// Interfaces de Datos
 interface Client {
   id: string;
   nombres: string;
   docIdentidad: string;
   ejecutivoCartera: string;
-  puesto?: string; // NUEVO: Añadido para soportar la columna B del Excel
-  ciudad?: string; // Opcional para vista previa
-  celular?: string; // Opcional para vista previa
+  puesto?: string; 
+  ciudad?: string; 
+  celular?: string; 
   tipoPlan: string;
   estadoActivo: string;
   grupoCodigo: string;
@@ -169,7 +168,6 @@ export default function App() {
   useEffect(() => {
     if (!user || !db) return;
     
-    // Ruta principal exclusiva para tu sistema
     const docRef = doc(db, 'sistema_aportes', 'base_principal');
     
     const unsubscribe = onSnapshot(docRef, (snapshot) => {
@@ -256,17 +254,36 @@ export default function App() {
     setFormData((prev) => ({ ...prev, valorTotalPagado: cuotas * cuotaVal }));
   };
 
+  // Función compartida para formatear Puesto (ej: 3 -> 003-1)
+  const formatearPuesto = (puestoRaw: any) => {
+    if (!puestoRaw || puestoRaw === 'undefined' || puestoRaw === 'null') return 'Sin Puesto';
+    let p = String(puestoRaw).replace(/\s+/g, '');
+    if (!p) return 'Sin Puesto';
+    
+    if (p.includes('-')) {
+      let parts = p.split('-');
+      parts[0] = parts[0].padStart(3, '0');
+      return parts.join('-');
+    } else {
+      return p.padStart(3, '0') + '-1'; // Asigna -1 automáticamente si no tiene guión
+    }
+  };
+
   const saveData = (goToTable: boolean = false) => {
     if (!formData.nombres || !formData.docIdentidad) {
       showToast('Por favor complete los campos obligatorios.', 'error');
       return;
     }
+    
+    // Normalizamos el puesto en caso de creación o edición manual
+    const formattedPuesto = formatearPuesto(formData.puesto);
+
     const newClientObj: Client = {
       id: formData.id || Date.now().toString(),
       nombres: formData.nombres || '',
       docIdentidad: formData.docIdentidad || '',
       ejecutivoCartera: formData.ejecutivoCartera || 'Sin Asignar',
-      puesto: formData.puesto || 'Sin Puesto',
+      puesto: formattedPuesto,
       tipoPlan: formData.tipoPlan || 'Compra Planificada',
       estadoActivo: formData.estadoActivo || 'ACTIVO',
       grupoCodigo: formData.grupoCodigo || 'N/A',
@@ -365,40 +382,47 @@ export default function App() {
           };
           if (!row || row.length === 0 || !getCol(['cliente', 'nombre'])) return null;
 
-          // =========================================================
-          // LECTURA ESTRICTA DE COLUMNAS SOLICITADAS POR EL USUARIO
-          // =========================================================
-          // Columna B (Índice 1) = Puesto del Cliente
-          const puestoExcel = row[1] !== undefined ? String(row[1]).trim() : getCol(['puesto', 'cargo']);
-          
-          // Columna G (Índice 6) = Monto Contratado
-          let montoExcel = 0;
-          if (row[6] !== undefined) {
-             if (typeof row[6] === 'number') {
-                montoExcel = row[6];
-             } else {
-                // Limpia formatos como $1,000.00
-                montoExcel = parseFloat(String(row[6]).replace(/[$,]/g, ''));
-             }
-          } else {
-             montoExcel = parseFloat(getCol(['monto', 'contratado']));
-          }
-          if (isNaN(montoExcel) || montoExcel <= 0) montoExcel = 10000;
+          // Función robusta para limpiar y convertir números de Excel (Ej. $1,000.50 y $1.000,50)
+          const cleanNumber = (val: any) => {
+            if (typeof val === 'number') return val;
+            if (!val) return 0;
+            let s = String(val).replace(/[$A-Za-z\s]/g, ''); 
+            if (/^\d{1,3}(\.\d{3})*,\d+$/.test(s) || (s.includes(',') && !s.includes('.'))) {
+               s = s.replace(/\./g, '').replace(',', '.');
+            } else {
+               s = s.replace(/,/g, '');
+            }
+            const n = parseFloat(s);
+            return isNaN(n) ? 0 : n;
+          };
 
-          // Columna H (Índice 7) = Valor de la Cuota
-          let cuotaExcel = 0;
-          if (row[7] !== undefined) {
-             if (typeof row[7] === 'number') {
-                cuotaExcel = row[7];
-             } else {
-                // Limpia formatos como $200.00
-                cuotaExcel = parseFloat(String(row[7]).replace(/[$,]/g, ''));
-             }
-          } else {
-             cuotaExcel = parseFloat(getCol(['cuota', 'mensual']));
-          }
-          if (isNaN(cuotaExcel) || cuotaExcel <= 0) cuotaExcel = 200; // Valor por defecto si viene vacío
           // =========================================================
+          // LECTURA ESTRICTA Y FORMATEO
+          // =========================================================
+          let rawPuesto = row[1] !== undefined ? String(row[1]) : getCol(['puesto', 'cargo']);
+          let puestoExcel = formatearPuesto(rawPuesto);
+          
+          let montoExcel = row[6] !== undefined ? cleanNumber(row[6]) : cleanNumber(getCol(['monto', 'contratado']));
+          if (montoExcel <= 0) montoExcel = 10000;
+
+          let cuotaExcel = row[7] !== undefined ? cleanNumber(row[7]) : cleanNumber(getCol(['cuota', 'mensual']));
+          if (cuotaExcel <= 0) cuotaExcel = 200; 
+
+          // EXTRACCIÓN ESTRICTA DE LA CÉDULA (Columna L = Índice 11)
+          // Obligamos al sistema a leer la Columna L primero.
+          let docExcel = row[11] !== undefined && String(row[11]).trim() !== '' 
+            ? String(row[11]).trim() 
+            : '';
+            
+          // Quitamos palabras como 'doc' o 'documento' del respaldo para evitar
+          // que lea columnas como "Documentos entregados (0-3)" por accidente.
+          if (!docExcel) {
+            docExcel = getCol(['cedula', 'identificaci', 'c.i']);
+          }
+          
+          if (!docExcel) {
+             docExcel = `9999999${index}`;
+          }
 
           const cuotasPagadas = parseInt(getCol(['cobradas', 'pagadas'])) || 0;
           let rawVencidas = getCol(['vencida', 'mora']);
@@ -417,14 +441,14 @@ export default function App() {
           return {
             id: `temp_${index}`,
             nombres: getCol(['cliente', 'nombre']) || 'CLIENTE IMPORTADO',
-            docIdentidad: getCol(['identificaci', 'doc', 'cedula', 'idcodigo']) || `9999999${index}`,
+            docIdentidad: docExcel,
             ejecutivoCartera: getCol(['ejecutivo', 'asesor']) || 'Sin Asignar',
-            puesto: puestoExcel || 'Sin Puesto', // Agregado Puesto
+            puesto: puestoExcel,
             ciudad: getCol(['ciudad']) || '',
             celular: getCol(['celular', 'telefono']) || '',
             grupoCodigo: getCol(['grupo', 'plan']) || 'ACV000',
-            montoContratado: montoExcel, // Agregado Monto Directo
-            valorCuota: cuotaExcel, // Agregado Cuota Directa desde Col H
+            montoContratado: montoExcel, 
+            valorCuota: cuotaExcel, 
             plazoPlan: 72,
             estadoPlan: getCol(['estado']) || 'No Adjudicado',
             cuotasPagadas: cuotasPagadas,
@@ -439,7 +463,7 @@ export default function App() {
         }).filter((item) => item !== null);
         
         setPreviewData(parsedData);
-        showToast(`Excel listo: ${parsedData.length} registros detectados. (Col B y G priorizadas)`, "success");
+        showToast(`Excel listo: ${parsedData.length} registros detectados.`, "success");
       } catch (err) {
         showToast("Error. Asegúrese de que sea un Excel válido (.xlsx).", "error");
       }
@@ -515,7 +539,6 @@ export default function App() {
       const updatedClientData = { ...clientData };
       updatedClientData[quotaNum] = { ...existingCuota, [field]: value };
 
-      // CASCADA DE FECHAS: Siempre al día 5
       if (field === 'vencimiento' && typeof value === 'string') {
         let [y, m] = value.split('-').map(Number);
         for (let k = quotaNum + 1; k <= (activeClient?.plazoPlan || 0); k++) {
@@ -607,7 +630,7 @@ export default function App() {
   const exportToExcel = (type: string) => {
     let csvContent = 'data:text/csv;charset=utf-8,';
     if (type === 'general') {
-      csvContent += 'CLIENTE,IDENTIFICACIÓN,PUESTO,GRUPO/PLAN,MONTO,ESTADO,CUOTA MES,VENCIDAS,VALOR VENCIDO,PAGADAS (TOTAL),COBRADAS (MES),RECAUDO (MES),PENDIENTES,VALOR PENDIENTE,EJECUTIVO\n';
+      csvContent += 'CLIENTE,IDENTIFICACIÓN,GRUPO / CÓDIGO,MONTO,ESTADO,CUOTA MES,VENCIDAS,VALOR VENCIDO,PAGADAS (TOTAL),COBRADAS (MES),RECAUDO (MES),PENDIENTES,VALOR PENDIENTE,EJECUTIVO\n';
       filteredReportClients.forEach((c) => {
         const vencidas = calculateVencidas(c);
         const valVencido = vencidas * c.valorCuota;
@@ -623,14 +646,35 @@ export default function App() {
         }
         const recaudoMes = cobradasMes * c.valorCuota;
         const pendientes = c.plazoPlan - c.cuotasPagadas;
-        csvContent += `"${c.nombres}","${c.docIdentidad}","${c.puesto || ''}","${c.grupoCodigo}",${c.montoContratado},"${c.estadoPlan}",${c.valorCuota},${vencidas},${valVencido},${c.cuotasPagadas},${cobradasMes},${recaudoMes},${pendientes},${pendientes * c.valorCuota},"${c.ejecutivoCartera}"\n`;
+        csvContent += `"${c.nombres}","${c.docIdentidad}","${c.grupoCodigo}-${c.puesto}",${c.montoContratado},"${c.estadoPlan}",${c.valorCuota},${vencidas},${valVencido},${c.cuotasPagadas},${cobradasMes},${recaudoMes},${pendientes},${pendientes * c.valorCuota},"${c.ejecutivoCartera}"\n`;
       });
     } else if (type === 'ejecutivos') {
-      csvContent += 'EJECUTIVO DE CARTERA,TOTAL CLIENTES,RECAUDO (MES)\n';
+      csvContent += 'EJECUTIVO DE CARTERA,TOTAL CLIENTES,TOTAL VENCIDO,RECAUDO (MES),SALDO PENDIENTE\n';
       Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).forEach((ej) => {
         const ejClients = clients.filter((c) => c.ejecutivoCartera === ej);
-        const totalRecaudo = ejClients.reduce((acc, curr) => acc + (curr.cuotasPagadas * curr.valorCuota), 0);
-        csvContent += `"${ej}",${ejClients.length},${totalRecaudo}\n`;
+        let totalVencido = 0;
+        let recaudoMes = 0;
+        let saldoPendiente = 0;
+        const calcDate = new Date(fechaCalculoMora);
+        
+        ejClients.forEach(c => {
+          const vencidas = calculateVencidas(c);
+          totalVencido += vencidas * c.valorCuota;
+          
+          let cobradasMes = 0;
+          if (customCuotas[c.id]) {
+            Object.values(customCuotas[c.id]).forEach((cuota) => {
+              if (cuota.fechaPago && cuota.abonoVal > 0) {
+                const d = new Date(cuota.fechaPago);
+                if (d.getMonth() === calcDate.getMonth() && d.getFullYear() === calcDate.getFullYear()) cobradasMes++;
+              }
+            });
+          }
+          recaudoMes += cobradasMes * c.valorCuota;
+          saldoPendiente += (c.plazoPlan - c.cuotasPagadas) * c.valorCuota;
+        });
+
+        csvContent += `"${ej}",${ejClients.length},${totalVencido},${recaudoMes},${saldoPendiente}\n`;
       });
     }
     const link = document.createElement("a");
@@ -671,7 +715,6 @@ export default function App() {
       const abonoVal = custom?.abonoVal ?? (isPaidDefault ? activeClient.valorCuota : 0);
       const currentVencimientoStr = custom?.vencimiento || defaultVencimiento;
       
-      // Update cascada base for next row
       const [cy, cm, cd] = currentVencimientoStr.split('-');
       baseVencimiento = new Date(Number(cy), Number(cm) - 1, Number(cd));
       baseVencimiento.setMonth(baseVencimiento.getMonth() + 1);
@@ -800,29 +843,17 @@ export default function App() {
                   <table className="min-w-full divide-y divide-slate-200 text-sm whitespace-nowrap">
                     <thead className="bg-slate-800 text-white sticky top-0 text-[10px] uppercase font-bold tracking-wider">
                       <tr>
-                        <th className="px-4 py-3 text-left">Grupo</th>
-                        <th className="px-4 py-3 text-left">Puesto</th>
-                        <th className="px-4 py-3 text-left">Ciudad</th>
-                        <th className="px-4 py-3 text-left">IDCodigo</th>
-                        <th className="px-4 py-3 text-left">Cliente</th>
-                        <th className="px-4 py-3 text-left">Tel. Celular</th>
-                        <th className="px-4 py-3 text-left">Monto</th>
-                        <th className="px-4 py-3 text-left">Cuota</th>
-                        <th className="px-4 py-3 text-left">Vencidas</th>
+                        <th className="px-4 py-3 text-left">Grupo / Código</th><th className="px-4 py-3 text-left">Ciudad</th>
+                        <th className="px-4 py-3 text-left">IDCodigo</th><th className="px-4 py-3 text-left">Cliente</th><th className="px-4 py-3 text-left">Tel. Celular</th>
+                        <th className="px-4 py-3 text-left">Monto</th><th className="px-4 py-3 text-left">Cuota</th><th className="px-4 py-3 text-left">Vencidas</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-slate-100">
                       {previewData.slice(0, 50).map((c, idx) => (
                         <tr key={idx} className="hover:bg-slate-50">
-                          <td className="px-4 py-3 text-slate-600">{c.grupoCodigo}</td>
-                          <td className="px-4 py-3 text-blue-600 font-bold bg-blue-50/50">{c.puesto || 'N/A'}</td>
-                          <td className="px-4 py-3 text-slate-500">{c.ciudad}</td>
-                          <td className="px-4 py-3 text-slate-500">{c.docIdentidad}</td>
-                          <td className="px-4 py-3 font-semibold text-slate-800">{c.nombres}</td>
-                          <td className="px-4 py-3 text-slate-500">{c.celular}</td>
-                          <td className="px-4 py-3 text-emerald-700 font-bold bg-emerald-50/50">${c.montoContratado}</td>
-                          <td className="px-4 py-3 text-slate-600">${c.valorCuota}</td>
-                          <td className="px-4 py-3 text-slate-500">{c.vencidasExcel}</td>
+                          <td className="px-4 py-3 font-bold text-blue-800">{c.grupoCodigo}-{c.puesto}</td><td className="px-4 py-3 text-slate-500">{c.ciudad}</td>
+                          <td className="px-4 py-3 text-slate-500">{c.docIdentidad}</td><td className="px-4 py-3 font-semibold text-slate-800">{c.nombres}</td><td className="px-4 py-3 text-slate-500">{c.celular}</td>
+                          <td className="px-4 py-3 text-slate-600">${c.montoContratado}</td><td className="px-4 py-3 text-slate-600">${c.valorCuota}</td><td className="px-4 py-3 text-slate-500">{c.vencidasExcel}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -854,9 +885,9 @@ export default function App() {
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead className="bg-slate-50 text-slate-700">
                   <tr>
-                    <th className="px-4 py-3 text-left font-bold text-xs uppercase">Cliente / Puesto</th>
-                    <th className="px-4 py-3 text-left font-bold text-xs uppercase">Documento</th>
-                    <th className="px-4 py-3 text-left font-bold text-xs uppercase">Plan / Grupo</th>
+                    <th className="px-4 py-3 text-left font-bold text-xs uppercase">Cliente</th>
+                    <th className="px-4 py-3 text-left font-bold text-xs uppercase">Cédula / Doc.</th>
+                    <th className="px-4 py-3 text-left font-bold text-xs uppercase">Grupo / Código</th>
                     <th className="px-4 py-3 text-left font-bold text-xs uppercase">Monto</th>
                     <th className="px-4 py-3 text-left font-bold text-xs uppercase">Ejecutivo</th>
                     <th className="px-4 py-3 text-center font-bold text-xs uppercase">Acciones</th>
@@ -865,12 +896,14 @@ export default function App() {
                 <tbody className="bg-white divide-y divide-slate-200">
                   {filteredClients.map((c) => (
                     <tr key={c.id} className="hover:bg-slate-50 border-b border-slate-100">
-                      <td className="px-4 py-4">
-                        <div className="font-bold text-slate-800 text-sm">{c.nombres}</div>
-                        <div className="text-[11px] text-slate-500 font-medium">{c.puesto || 'Sin Puesto'}</div>
+                      <td className="px-4 py-4 font-bold text-slate-800 text-sm">{c.nombres}</td>
+                      <td className="px-4 py-4 font-semibold text-slate-600 text-sm">{c.docIdentidad}</td>
+                      <td className="px-4 py-4 text-sm">
+                        <div className="text-slate-600 font-medium">{c.tipoPlan}</div>
+                        <div className="text-[13px] font-bold text-blue-700 tracking-wider mt-0.5">
+                          {c.grupoCodigo}-{c.puesto}
+                        </div>
                       </td>
-                      <td className="px-4 py-4 text-slate-500 text-sm">{c.docIdentidad}</td>
-                      <td className="px-4 py-4 text-sm"><div className="text-slate-600 font-medium">{c.tipoPlan}</div><div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-0.5">GRUPO: {c.grupoCodigo}</div></td>
                       <td className="px-4 py-4 font-bold text-slate-800 text-sm">${c.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                       <td className="px-4 py-4 text-slate-600 text-sm">{c.ejecutivoCartera}</td>
                       <td className="px-4 py-4 text-center">
@@ -913,9 +946,7 @@ export default function App() {
                   <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Nombres</label><input type="text" value={formData.nombres || ''} onChange={(e) => setFormData({ ...formData, nombres: e.target.value })} className="w-full rounded border-slate-300 p-2 border" required /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Doc. Identidad</label><input type="text" value={formData.docIdentidad || ''} onChange={(e) => setFormData({ ...formData, docIdentidad: e.target.value })} className="w-full rounded border-slate-300 p-2 border" required /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Ejecutivo</label><input type="text" value={formData.ejecutivoCartera || ''} onChange={(e) => setFormData({ ...formData, ejecutivoCartera: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
-                  
-                  {/* NUEVO CAMPO PUESTO */}
-                  <div className="md:col-span-4"><label className="block text-sm font-bold text-slate-700 mb-1">Puesto (Columna B Excel)</label><input type="text" value={formData.puesto || ''} onChange={(e) => setFormData({ ...formData, puesto: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-blue-50 focus:bg-white" /></div>
+                  <div className="md:col-span-4"><label className="block text-sm font-bold text-slate-700 mb-1">Puesto (Ej: 3, 15, 008-1)</label><input type="text" value={formData.puesto || ''} onChange={(e) => setFormData({ ...formData, puesto: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-blue-50 focus:bg-white" /></div>
                 </div>
               </div>
               <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
@@ -934,7 +965,7 @@ export default function App() {
               <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-200 pb-2">Valores</h3>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                  <div><label className="block text-sm font-bold text-slate-700 mb-1">Monto (Columna G)</label><input type="number" value={formData.montoContratado || ''} onChange={(e) => { setFormData({ ...formData, montoContratado: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border bg-blue-50 focus:bg-white" /></div>
+                  <div><label className="block text-sm font-bold text-slate-700 mb-1">Monto</label><input type="number" value={formData.montoContratado || ''} onChange={(e) => { setFormData({ ...formData, montoContratado: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Plazo (Meses)</label><input type="number" value={formData.plazoPlan || ''} onChange={(e) => setFormData({ ...formData, plazoPlan: Number(e.target.value) })} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Cuota</label><input type="number" value={formData.valorCuota || ''} onChange={(e) => { setFormData({ ...formData, valorCuota: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Pagadas</label><input type="number" value={formData.cuotasPagadas || ''} onChange={(e) => { setFormData({ ...formData, cuotasPagadas: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
@@ -1066,9 +1097,8 @@ export default function App() {
                     <h3 className="text-sm font-bold text-slate-800 mb-3 pb-2 border-b border-slate-100">Datos del Cliente</h3>
                     <div className="grid grid-cols-[120px_1fr] gap-y-2 text-xs">
                       <span className="text-slate-500">Cliente:</span><span className="font-bold uppercase">{activeClient.nombres}</span>
-                      <span className="text-slate-500">Puesto:</span><span className="font-bold">{activeClient.puesto || 'N/A'}</span>
-                      <span className="text-slate-500">Identificación:</span><span>{activeClient.docIdentidad}</span>
-                      <span className="text-slate-500">Grupo / Código:</span><span>{activeClient.grupoCodigo}</span>
+                      <span className="text-slate-500">Cédula:</span><span className="font-semibold text-slate-800">{activeClient.docIdentidad}</span>
+                      <span className="text-slate-500">Grupo / Código:</span><span className="font-bold text-blue-700 text-sm">{activeClient.grupoCodigo}-{activeClient.puesto}</span>
                       <span className="text-slate-500">Ejecutivo Asignado:</span><span className="font-bold">{activeClient.ejecutivoCartera}</span>
                     </div>
                   </div>
@@ -1194,9 +1224,8 @@ export default function App() {
                     <h3 className="font-bold text-[11px] text-slate-800 border-b border-slate-200 mb-2 pb-1">Datos del Cliente</h3>
                     <div className="grid grid-cols-[110px_1fr] gap-y-1.5">
                       <span className="text-slate-500">Cliente:</span><span className="font-bold uppercase text-slate-800">{activeClient.nombres}</span>
-                      <span className="text-slate-500">Puesto:</span><span className="text-slate-800">{activeClient.puesto || 'N/A'}</span>
-                      <span className="text-slate-500">Identificación:</span><span className="text-slate-800">{activeClient.docIdentidad}</span>
-                      <span className="text-slate-500">Grupo / Código:</span><span className="text-slate-800">{activeClient.grupoCodigo}</span>
+                      <span className="text-slate-500">Cédula:</span><span className="font-bold text-slate-800">{activeClient.docIdentidad}</span>
+                      <span className="text-slate-500">Grupo / Código:</span><span className="font-bold text-slate-900 text-[11px]">{activeClient.grupoCodigo}-{activeClient.puesto}</span>
                       <span className="text-slate-500">Ejecutivo Asignado:</span><span className="font-bold text-slate-800">{activeClient.ejecutivoCartera}</span>
                     </div>
                   </div>
@@ -1286,6 +1315,7 @@ export default function App() {
             <div className="flex justify-between items-center mb-6">
               <div className="flex gap-4 items-center">
                 <span className="font-medium text-slate-500">Cliente: <span className="font-bold text-slate-800 uppercase ml-1">{activeClient.nombres}</span></span>
+                <span className="font-medium text-slate-500">Cédula: <span className="font-bold text-slate-800 ml-1">{activeClient.docIdentidad}</span></span>
                 <span className="font-medium text-slate-500">Plan: <span className="font-semibold text-slate-700 ml-1">{activeClient.tipoPlan} - {activeClient.estadoPlan}</span></span>
                 <span className="font-medium text-slate-500">Estado: <span className="px-2 py-1 rounded bg-emerald-100 text-emerald-800 font-bold uppercase text-xs ml-1">{activeClient.estadoActivo}</span></span>
               </div>
@@ -1299,7 +1329,7 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-5 gap-4 mb-6 text-sm">
-              <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">GRUPO / CÓDIGO</p><p className="font-bold text-slate-700">{activeClient.grupoCodigo}</p></div>
+              <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">GRUPO / CÓDIGO</p><p className="font-bold text-blue-700">{activeClient.grupoCodigo}-{activeClient.puesto}</p></div>
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">MONTO CONTRATADO</p><p className="font-bold text-slate-700">${activeClient.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</p></div>
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">PLAZO CONTRATO</p><p className="font-bold text-slate-700">{activeClient.plazoPlan} Meses</p></div>
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">TOTAL CUOTAS</p><p className="font-bold text-slate-700">${(activeClient.valorCuota * activeClient.plazoPlan).toLocaleString('es-EC', { minimumFractionDigits: 2 })}</p></div>
@@ -1516,7 +1546,7 @@ export default function App() {
                       return (
                         <tr key={c.id} className="hover:bg-slate-50">
                           <td className="px-2 py-2 font-medium text-left">{c.nombres}</td><td className="px-2 py-2 text-left">{c.docIdentidad}</td>
-                          <td className="px-2 py-2 text-left">{c.grupoCodigo}</td><td className="px-2 py-2 font-medium text-right">${c.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                          <td className="px-2 py-2 text-left font-bold text-slate-700">{c.grupoCodigo}-{c.puesto}</td><td className="px-2 py-2 font-medium text-right">${c.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                           <td className="px-2 py-2 text-center"><span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-bold text-[10px]">{c.estadoPlan}</span></td>
                           <td className="px-2 py-2 font-medium text-right">${c.valorCuota.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                           <td className="px-2 py-2 font-bold text-red-600 bg-red-50">{vencidas}</td><td className="px-2 py-2 font-bold text-red-600 bg-red-50 text-right">${valVencido.toFixed(2)}</td>
@@ -1536,19 +1566,50 @@ export default function App() {
                 <h3 className="text-lg font-bold text-slate-700">Recaudación por Ejecutivo</h3>
                 <button onClick={() => exportToExcel('ejecutivos')} className="px-4 py-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold text-xs">Descargar Excel</button>
               </div>
-              <div className="table-container overflow-x-auto border border-slate-200 rounded max-w-2xl">
+              <div className="table-container overflow-x-auto border border-slate-200 rounded max-w-4xl">
                 <table className="min-w-full divide-y divide-slate-200 text-sm whitespace-nowrap">
                   <thead className="bg-[#1e293b] text-white">
-                    <tr><th className="px-4 py-2 text-left font-bold text-xs">EJECUTIVO DE CARTERA</th><th className="px-4 py-2 text-center font-bold text-xs">TOTAL CLIENTES</th><th className="px-4 py-2 text-right font-bold text-xs text-emerald-400">RECAUDO (MES)</th></tr>
+                    <tr>
+                      <th className="px-4 py-2 text-left font-bold text-xs">EJECUTIVO DE CARTERA</th>
+                      <th className="px-4 py-2 text-center font-bold text-xs">TOTAL CLIENTES</th>
+                      <th className="px-4 py-2 text-right font-bold text-xs text-red-400">TOTAL VENCIDO</th>
+                      <th className="px-4 py-2 text-right font-bold text-xs text-emerald-400">RECAUDO (MES)</th>
+                      <th className="px-4 py-2 text-right font-bold text-xs text-amber-400">SALDO PENDIENTE</th>
+                    </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-slate-200">
                     {Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).map((ej) => {
                       const ejClients = clients.filter((c) => c.ejecutivoCartera === ej);
-                      const totalRecaudo = ejClients.reduce((acc, curr) => acc + (curr.cuotasPagadas * curr.valorCuota), 0);
+                      
+                      let totalVencido = 0;
+                      let recaudoMes = 0;
+                      let saldoPendiente = 0;
+                      const calcDate = new Date(fechaCalculoMora);
+                      
+                      ejClients.forEach(c => {
+                        const vencidas = calculateVencidas(c);
+                        totalVencido += vencidas * c.valorCuota;
+                        
+                        let cobradasMes = 0;
+                        if (customCuotas[c.id]) {
+                          Object.values(customCuotas[c.id]).forEach((cuota) => {
+                            if (cuota.fechaPago && cuota.abonoVal > 0) {
+                              const d = new Date(cuota.fechaPago);
+                              if (d.getMonth() === calcDate.getMonth() && d.getFullYear() === calcDate.getFullYear()) cobradasMes++;
+                            }
+                          });
+                        }
+                        recaudoMes += cobradasMes * c.valorCuota;
+                        saldoPendiente += (c.plazoPlan - c.cuotasPagadas) * c.valorCuota;
+                      });
+
                       return (
                         <tr key={ej} className="hover:bg-slate-50">
-                          <td className="px-4 py-2 font-bold">{ej}</td><td className="px-4 py-2 text-center font-medium">{ejClients.length}</td>
-                          <td className="px-4 py-2 text-right text-emerald-600 font-bold">${totalRecaudo.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2 font-bold">{ej}</td>
+                          <td className="px-4 py-2 text-center font-medium">{ejClients.length}</td>
+                          <td className="px-4 py-2 text-right text-red-600 font-bold">${totalVencido.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2 text-right text-emerald-600 font-bold">${recaudoMes.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2 text-right text-amber-600 font-bold">${saldoPendiente.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                         </tr>
                       );
                     })}
