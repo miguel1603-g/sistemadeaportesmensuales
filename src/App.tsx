@@ -1033,7 +1033,15 @@ export default function App() {
                 {formData.estadoPlan === 'Adjudicado' && (
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6 border-t border-slate-200 pt-4 mt-4">
                     <div><label className="block text-sm font-bold text-slate-700 mb-1">F. Adjudicación</label><input type="date" value={formData.fechaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, fechaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white" /></div>
-                    <div><label className="block text-sm font-bold text-slate-700 mb-1">Forma Adjudicación</label><input type="text" placeholder="Ej: Oferta, Sorteo..." value={formData.formaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, formaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">Forma Adjudicación</label>
+                      <select value={formData.formaAdjudicacion || ''} onChange={(e) => setFormData({ ...formData, formaAdjudicacion: e.target.value })} className="w-full rounded border-slate-300 p-2 border bg-white">
+                        <option value="">Seleccione...</option>
+                        <option value="Oferta">Oferta</option>
+                        <option value="Sorteo">Sorteo</option>
+                        <option value="Entrada">Entrada</option>
+                      </select>
+                    </div>
                     <div><label className="block text-sm font-bold text-slate-700 mb-1"># Asamblea</label><input type="text" value={formData.numeroAsamblea || ''} onChange={(e) => setFormData({ ...formData, numeroAsamblea: e.target.value })} className="w-full rounded border-slate-300 p-2 border" /></div>
                     <div>
                       <label className="block text-sm font-bold text-emerald-700 mb-1">Fecha de Entrega</label>
@@ -1103,6 +1111,10 @@ export default function App() {
             ========================================= */}
         {activeTab === 'payment-table' && activeClient && (() => {
           let runningSaldoPlan = activeClient.valorCuota * activeClient.plazoPlan;
+          if (activeClient.tipoPlan === 'Adjudicación Planificada') {
+              runningSaldoPlan += (activeClient.valorEntrada || 0);
+          }
+
           let canceladasCount = 0;
           let totalCancelado = 0;
 
@@ -1115,7 +1127,41 @@ export default function App() {
           let [y, m, rawD] = (activeClient.fechaPrimerPago || '2021-08-05').split('-');
           let baseVencimiento = new Date(Number(y), Number(m) - 1, 5);
 
-          const calculatedRows = Array.from({ length: activeClient.plazoPlan }, (_, idx) => {
+          const calculatedRows: any[] = [];
+
+          if (activeClient.tipoPlan === 'Adjudicación Planificada') {
+              const entradaVal = activeClient.valorEntrada || 0;
+              const isPaidEntrada = !!activeClient.fechaPagoEntrada;
+              const abonoEntrada = isPaidEntrada ? entradaVal : 0;
+              
+              const saldoInicial = runningSaldoPlan;
+              const saldoCuota = Math.max(0, entradaVal - abonoEntrada);
+              runningSaldoPlan = Math.max(0, runningSaldoPlan - abonoEntrada);
+              
+              if (isPaidEntrada) {
+                  totalCancelado += abonoEntrada;
+              }
+
+              calculatedRows.push({
+                  i: 'ENT.',
+                  cuotaVal: entradaVal,
+                  abonoVal: abonoEntrada,
+                  saldoInicial: saldoInicial,
+                  saldoCuota: saldoCuota,
+                  saldoPlan: runningSaldoPlan,
+                  currentVenc: activeClient.fechaPagoEntrada || '',
+                  currentPago: activeClient.fechaPagoEntrada || '',
+                  isPaid: isPaidEntrada,
+                  rowStatus: isPaidEntrada ? 'ENTRADA PAGADA' : 'ENTRADA',
+                  rowStatusClass: isPaidEntrada ? 'text-blue-700 font-bold text-[9px]' : 'text-amber-600 font-bold text-[9px]',
+                  rowBadgeClass: isPaidEntrada ? 'bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200' : 'bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300',
+                  diasCalculados: 0,
+                  isEntrada: true,
+                  onClickAction: undefined
+              });
+          }
+
+          const regularRows = Array.from({ length: activeClient.plazoPlan }, (_, idx) => {
             const i = idx + 1;
             
             const yy = baseVencimiento.getFullYear();
@@ -1169,9 +1215,11 @@ export default function App() {
             }
 
             return {
-              i, cuotaVal, abonoVal, saldoInicial, saldoCuota, saldoPlan, currentVenc, currentPago, isPaid, rowStatus, rowStatusClass, rowBadgeClass, diasCalculados, onClickAction
+              i, cuotaVal, abonoVal, saldoInicial, saldoCuota, saldoPlan, currentVenc, currentPago, isPaid, rowStatus, rowStatusClass, rowBadgeClass, diasCalculados, onClickAction, isEntrada: false
             };
           });
+
+          calculatedRows.push(...regularRows);
 
           return (
             <div className="w-full">
@@ -1284,28 +1332,44 @@ export default function App() {
                           <td className="py-2 px-2 font-bold text-slate-800">{row.i}</td>
                           <td className="py-2 px-2 text-right text-slate-500">${row.saldoInicial.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
                           <td className="py-2 px-2 text-center">
-                            <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
-                              <input type="number" step="0.01" value={row.cuotaVal} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'cuotaVal', Number(e.target.value), row.currentVenc, row.currentPago)} className="w-16 text-center bg-transparent outline-none text-slate-600 font-medium" />
-                            </div>
+                            {row.isEntrada ? (
+                              <span className="font-bold text-slate-700">${row.cuotaVal.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>
+                            ) : (
+                              <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
+                                <input type="number" step="0.01" value={row.cuotaVal} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'cuotaVal', Number(e.target.value), row.currentVenc, row.currentPago)} className="w-16 text-center bg-transparent outline-none text-slate-600 font-medium" />
+                              </div>
+                            )}
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
-                              <input type="number" step="0.01" value={row.abonoVal} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'abonoVal', Number(e.target.value), row.currentVenc, row.currentPago)} className="w-16 text-center bg-transparent outline-none font-bold text-slate-700" />
-                            </div>
+                            {row.isEntrada ? (
+                              <span className="font-bold text-emerald-700">${row.abonoVal.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>
+                            ) : (
+                              <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
+                                <input type="number" step="0.01" value={row.abonoVal} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'abonoVal', Number(e.target.value), row.currentVenc, row.currentPago)} className="w-16 text-center bg-transparent outline-none font-bold text-slate-700" />
+                              </div>
+                            )}
                           </td>
                           <td className="py-2 px-2 text-right text-slate-400">${row.saldoCuota.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
                           <td className="py-2 px-2 text-right font-bold text-blue-900">${row.saldoPlan.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
                           <td className="py-2 px-2 text-center">
-                            <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
-                              <input type="date" value={row.currentVenc} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'vencimiento', e.target.value, row.currentVenc, row.currentPago)} className="w-24 text-center bg-transparent outline-none text-[9px] text-slate-600 cursor-pointer" />
-                            </div>
+                            {row.isEntrada ? (
+                              <span className="text-[10px] font-medium text-slate-600">{row.currentVenc ? formatD(row.currentVenc) : '-'}</span>
+                            ) : (
+                              <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
+                                <input type="date" value={row.currentVenc} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'vencimiento', e.target.value, row.currentVenc, row.currentPago)} className="w-24 text-center bg-transparent outline-none text-[9px] text-slate-600 cursor-pointer" />
+                              </div>
+                            )}
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
-                              <input type="date" value={row.currentPago} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'fechaPago', e.target.value, row.currentVenc, row.currentPago)} className="w-24 text-center bg-transparent outline-none text-[9px] text-slate-600 cursor-pointer" />
-                            </div>
+                            {row.isEntrada ? (
+                              <span className="text-[10px] font-medium text-slate-600">{row.currentPago ? formatD(row.currentPago) : '-'}</span>
+                            ) : (
+                              <div className="inline-block border border-slate-200 rounded px-2 py-1 bg-white hover:border-blue-400 focus-within:border-blue-500 transition-colors">
+                                <input type="date" value={row.currentPago} onChange={(e) => handleCuotaEdit(activeClient.id, row.i, 'fechaPago', e.target.value, row.currentVenc, row.currentPago)} className="w-24 text-center bg-transparent outline-none text-[9px] text-slate-600 cursor-pointer" />
+                              </div>
+                            )}
                           </td>
-                          <td className="py-2 px-2 text-center text-slate-500">{row.diasCalculados > 0 ? row.diasCalculados : '0'}</td>
+                          <td className="py-2 px-2 text-center text-slate-500">{row.diasCalculados > 0 ? row.diasCalculados : (row.isEntrada ? '-' : '0')}</td>
                           <td className="py-2 px-2 text-center">
                             <span 
                               className={`inline-block w-full py-0.5 ${row.rowBadgeClass} ${row.rowStatusClass}`}
@@ -1416,9 +1480,9 @@ export default function App() {
                         <td className="py-1.5 px-1 text-center text-slate-700">${row.abonoVal.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
                         <td className="py-1.5 px-1 text-right text-slate-400">${row.saldoCuota.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
                         <td className="py-1.5 px-1 text-right font-bold text-blue-900">${row.saldoPlan.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
-                        <td className="py-1.5 px-1 text-center text-slate-600">{formatD(row.currentVenc)}</td>
-                        <td className="py-1.5 px-1 text-center text-slate-600">{row.isPaid ? formatD(row.currentPago) : ''}</td>
-                        <td className="py-1.5 px-1 text-center text-slate-500">{row.diasCalculados > 0 ? row.diasCalculados : '0'}</td>
+                        <td className="py-1.5 px-1 text-center text-slate-600">{row.isEntrada && !row.currentVenc ? '-' : formatD(row.currentVenc)}</td>
+                        <td className="py-1.5 px-1 text-center text-slate-600">{row.isPaid && row.currentPago ? formatD(row.currentPago) : '-'}</td>
+                        <td className="py-1.5 px-1 text-center text-slate-500">{row.diasCalculados > 0 ? row.diasCalculados : (row.isEntrada ? '-' : '0')}</td>
                         <td className="py-1.5 px-1 text-center">
                           <span className={`inline-block w-full py-0.5 ${row.rowBadgeClass} ${row.rowStatusClass} text-[8px]`}>{row.rowStatus}</span>
                         </td>
