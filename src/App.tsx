@@ -93,7 +93,10 @@ export default function App() {
   const [descMora, setDescMora] = useState<Record<number, number>>({});
   const [descCobranza, setDescCobranza] = useState<Record<number, number>>({});
   
-  const [fechaCalculoMora, setFechaCalculoMora] = useState(new Date().toISOString().split('T')[0]);
+  const dHoy = new Date();
+  const todayStr = `${dHoy.getFullYear()}-${String(dHoy.getMonth() + 1).padStart(2, '0')}-${String(dHoy.getDate()).padStart(2, '0')}`;
+  const [fechaCalculoMora, setFechaCalculoMora] = useState(todayStr);
+
   const [moraParams, setMoraParams] = useState<MoraParam[]>([
     { diasMin: 1, diasMax: 15, tasaAnual: 5 },
     { diasMin: 16, diasMax: 30, tasaAnual: 7 },
@@ -132,6 +135,7 @@ export default function App() {
   const [reportFilterEstado, setReportFilterEstado] = useState('Todos');
   const [reportFilterEjecutivo, setReportFilterEjecutivo] = useState('Todos');
   const [reportFilterVencidas, setReportFilterVencidas] = useState('');
+  const [reportFilterCobradas, setReportFilterCobradas] = useState('');
 
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmModalMessage, setConfirmModalMessage] = useState('');
@@ -184,7 +188,7 @@ export default function App() {
         if (data.descCobranza) setDescCobranza(data.descCobranza);
         if (data.moraParams) setMoraParams(data.moraParams);
         if (data.cobranzaParams) setCobranzaParams(data.cobranzaParams);
-        if (data.fechaCalculoMora) setFechaCalculoMora(data.fechaCalculoMora);
+        // Eliminamos la sincronización de la fecha de cálculo para que SIEMPRE sea "hoy" al abrir la app.
       }
     }, (error: any) => {
       setIsOnline(false);
@@ -206,7 +210,7 @@ export default function App() {
     const sanitize = (obj: any) => JSON.parse(JSON.stringify(obj));
     const payload = sanitize({
       clients, customCuotas, gestiones, descMora, descCobranza,
-      moraParams, cobranzaParams, fechaCalculoMora,
+      moraParams, cobranzaParams,
       ...overrides
     });
 
@@ -233,10 +237,12 @@ export default function App() {
   };
 
   const createNewClient = () => {
+    const dLocal = new Date();
+    const startStr = `${dLocal.getFullYear()}-${String(dLocal.getMonth() + 1).padStart(2, '0')}-05`;
     setFormData({
       id: Date.now().toString(), nombres: '', docIdentidad: '', ejecutivoCartera: '', puesto: '', tipoPlan: 'Compra Planificada',
       estadoActivo: 'ACTIVO', grupoCodigo: '', estadoPlan: 'No Adjudicado', montoContratado: 0, valorInscripcion: 0,
-      plazoPlan: 12, valorCuota: 0, cuotasPagadas: 0, valorTotalPagado: 0, fechaPrimerPago: new Date().toISOString().split('T')[0],
+      plazoPlan: 12, valorCuota: 0, cuotasPagadas: 0, valorTotalPagado: 0, fechaPrimerPago: startStr,
       porcentajeEntrada: 0, fechaPagoEntrada: '', valorEntrada: 0, fechaEntrega: ''
     });
     switchTab('client-info');
@@ -454,7 +460,7 @@ export default function App() {
           // EXTRACCIÓN ESTRICTA DE LA CÉDULA (Columna L = Índice 11)
           let docExcel = row[11] !== undefined && String(row[11]).trim() !== '' 
             ? String(row[11]).trim() 
-            : getCol(['cedula', 'identificaci', 'c.i']);
+            : getCol(['cedula', 'identificaci', 'documento']);
           
           if (!docExcel) {
              docExcel = `9999999${index}`;
@@ -465,13 +471,12 @@ export default function App() {
           if (!rawVencidas && row.length > 8) rawVencidas = String(row[8] || '').trim();
           const vencidasExcel = parseInt(rawVencidas, 10) || 0;
 
-          let fechaPrimerPago = new Date().toISOString().split('T')[0];
+          let fechaPrimerPago = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-05`;
           const expectedCuotas = cuotasPagadas + vencidasExcel;
           if (expectedCuotas > 0) {
               const pastDate = new Date();
               pastDate.setMonth(pastDate.getMonth() - (expectedCuotas - 1));
-              pastDate.setDate(28);
-              fechaPrimerPago = pastDate.toISOString().split('T')[0];
+              fechaPrimerPago = `${pastDate.getFullYear()}-${String(pastDate.getMonth() + 1).padStart(2, '0')}-05`;
           }
 
           return {
@@ -634,17 +639,71 @@ export default function App() {
     setNuevaGestion('');
   };
 
-  const calculateVencidas = (c: Client) => {
-    if (!c.fechaPrimerPago) return 0;
-    const f1 = new Date(c.fechaPrimerPago);
-    const f2 = new Date(fechaCalculoMora);
-    if (isNaN(f1.getTime()) || isNaN(f2.getTime())) return 0;
-    let monthsDiff = (f2.getFullYear() - f1.getFullYear()) * 12 + (f2.getMonth() - f1.getMonth());
-    let expectedCuotas = monthsDiff + 1; 
-    if (expectedCuotas > c.plazoPlan) expectedCuotas = c.plazoPlan;
-    if (expectedCuotas < 0) expectedCuotas = 0;
-    const venc = expectedCuotas - c.cuotasPagadas;
-    return venc > 0 ? venc : 0;
+  const getReportMetrics = (c: Client) => {
+    let vencidasMeta = 0;
+    let cobradasMes = 0;
+    let recaudoMes = 0;
+    let pagadasTotal = 0;
+    
+    const currentMonth = new Date().getMonth() + 1;
+    const currentYear = new Date().getFullYear();
+    const fechaCalc = new Date(`${fechaCalculoMora}T00:00:00`).getTime();
+    
+    let [y, m, d] = (c.fechaPrimerPago || '2021-08-05').split('-');
+    let baseVencimiento = new Date(Number(y), Number(m) - 1, 5);
+
+    for (let i = 1; i <= c.plazoPlan; i++) {
+      const yy = baseVencimiento.getFullYear();
+      const mm = String(baseVencimiento.getMonth() + 1).padStart(2, '0');
+      let defaultVencimiento = `${yy}-${mm}-05`;
+
+      const custom = customCuotas[c.id]?.[i];
+      const isPaidDefault = i <= c.cuotasPagadas;
+      const cuotaVal = custom?.cuotaVal ?? c.valorCuota;
+      const abonoVal = custom?.abonoVal ?? (isPaidDefault ? c.valorCuota : 0);
+      const currentVenc = custom?.vencimiento || defaultVencimiento;
+      const fechaPagoStr = custom?.fechaPago || (isPaidDefault ? currentVenc : '');
+
+      if (abonoVal >= cuotaVal) {
+        pagadasTotal++;
+      }
+
+      const [cy, cm, cd] = currentVenc.split('-');
+      baseVencimiento = new Date(Number(cy), Number(cm) - 1, 5);
+      baseVencimiento.setMonth(baseVencimiento.getMonth() + 1);
+
+      let isPaidThisMonth = false;
+      if (fechaPagoStr && abonoVal > 0) {
+        const parts = fechaPagoStr.split('-');
+        if (parts.length >= 2) {
+          const py = parseInt(parts[0], 10);
+          const pm = parseInt(parts[1], 10);
+          if (py === currentYear && pm === currentMonth) {
+            isPaidThisMonth = true;
+            cobradasMes++;
+            recaudoMes += abonoVal;
+          }
+        }
+      }
+
+      const timeDiff = fechaCalc - new Date(`${currentVenc}T00:00:00`).getTime();
+      const daysLate = Math.round(timeDiff / (1000 * 3600 * 24));
+      
+      if (daysLate > 0) {
+        // Mantiene la cuota en "VENCIDAS" si no ha sido pagada en MESES ANTERIORES.
+        // Si la pagó ESTE MES, sigue contando como Vencida-Meta para que la resta con Cobradas sea exacta.
+        const isPaidPreviousMonths = (abonoVal >= cuotaVal) && !isPaidThisMonth;
+        if (!isPaidPreviousMonths) {
+          vencidasMeta++;
+        }
+      }
+    }
+    
+    const valVencidoMeta = vencidasMeta * c.valorCuota;
+    const pendientes = vencidasMeta - cobradasMes;
+    const valPendiente = valVencidoMeta - recaudoMes;
+    
+    return { vencidasMeta, valVencidoMeta, cobradasMes, recaudoMes, pendientes, valPendiente, pagadasTotal };
   };
 
   const filteredClients = clients.filter((c) =>
@@ -658,31 +717,23 @@ export default function App() {
     let matchesVencidas = true;
     if (reportFilterVencidas !== '') {
       const targetVencidas = parseInt(reportFilterVencidas, 10);
-      if (!isNaN(targetVencidas)) matchesVencidas = calculateVencidas(c) === targetVencidas;
+      if (!isNaN(targetVencidas)) matchesVencidas = getReportMetrics(c).vencidasMeta === targetVencidas;
     }
-    return matchesSearch && matchesEstado && matchesEjecutivo && matchesVencidas;
+    let matchesCobradas = true;
+    if (reportFilterCobradas !== '') {
+      const targetCobradas = parseInt(reportFilterCobradas, 10);
+      if (!isNaN(targetCobradas)) matchesCobradas = getReportMetrics(c).cobradasMes === targetCobradas;
+    }
+    return matchesSearch && matchesEstado && matchesEjecutivo && matchesVencidas && matchesCobradas;
   });
 
   const exportToExcel = (type: string) => {
     let csvContent = 'data:text/csv;charset=utf-8,';
     if (type === 'general') {
-      csvContent += 'CLIENTE,IDENTIFICACIÓN,GRUPO / CÓDIGO,MONTO,ESTADO,CUOTA MES,VENCIDAS,VALOR VENCIDO,PAGADAS (TOTAL),COBRADAS (MES),RECAUDO (MES),PENDIENTES,VALOR PENDIENTE,EJECUTIVO\n';
+      csvContent += 'CLIENTE,IDENTIFICACIÓN,GRUPO / CÓDIGO,MONTO,ESTADO,CUOTA MES,PAGADAS (TOTAL),VENCIDAS,VALOR VENCIDO,COBRADAS (MES),RECAUDO (MES),PENDIENTES,VALOR PENDIENTE,EJECUTIVO\n';
       filteredReportClients.forEach((c) => {
-        const vencidas = calculateVencidas(c);
-        const valVencido = vencidas * c.valorCuota;
-        let cobradasMes = 0;
-        const calcDate = new Date(fechaCalculoMora);
-        if (customCuotas[c.id]) {
-          Object.values(customCuotas[c.id]).forEach((cuota) => {
-            if (cuota.fechaPago && cuota.abonoVal > 0) {
-              const d = new Date(cuota.fechaPago);
-              if (d.getMonth() === calcDate.getMonth() && d.getFullYear() === calcDate.getFullYear()) cobradasMes++;
-            }
-          });
-        }
-        const recaudoMes = cobradasMes * c.valorCuota;
-        const pendientes = c.plazoPlan - c.cuotasPagadas;
-        csvContent += `"${c.nombres}","${c.docIdentidad}","${c.grupoCodigo}-${c.puesto}",${c.montoContratado},"${c.estadoPlan}",${c.valorCuota},${vencidas},${valVencido},${c.cuotasPagadas},${cobradasMes},${recaudoMes},${pendientes},${pendientes * c.valorCuota},"${c.ejecutivoCartera}"\n`;
+        const metrics = getReportMetrics(c);
+        csvContent += `"${c.nombres}","${c.docIdentidad}","${c.grupoCodigo}-${c.puesto}",${c.montoContratado},"${c.estadoPlan}",${c.valorCuota},${metrics.pagadasTotal},${metrics.vencidasMeta},${metrics.valVencidoMeta},${metrics.cobradasMes},${metrics.recaudoMes},${metrics.pendientes},${metrics.valPendiente},"${c.ejecutivoCartera}"\n`;
       });
     } else if (type === 'ejecutivos') {
       csvContent += 'EJECUTIVO DE CARTERA,TOTAL CLIENTES,TOTAL VENCIDO,RECAUDO (MES),SALDO PENDIENTE\n';
@@ -691,23 +742,12 @@ export default function App() {
         let totalVencido = 0;
         let recaudoMes = 0;
         let saldoPendiente = 0;
-        const calcDate = new Date(fechaCalculoMora);
         
         ejClients.forEach(c => {
-          const vencidas = calculateVencidas(c);
-          totalVencido += vencidas * c.valorCuota;
-          
-          let cobradasMes = 0;
-          if (customCuotas[c.id]) {
-            Object.values(customCuotas[c.id]).forEach((cuota) => {
-              if (cuota.fechaPago && cuota.abonoVal > 0) {
-                const d = new Date(cuota.fechaPago);
-                if (d.getMonth() === calcDate.getMonth() && d.getFullYear() === calcDate.getFullYear()) cobradasMes++;
-              }
-            });
-          }
-          recaudoMes += cobradasMes * c.valorCuota;
-          saldoPendiente += (c.plazoPlan - c.cuotasPagadas) * c.valorCuota;
+          const metrics = getReportMetrics(c);
+          totalVencido += metrics.valVencidoMeta;
+          recaudoMes += metrics.recaudoMes;
+          saldoPendiente += metrics.valPendiente;
         });
 
         csvContent += `"${ej}",${ejClients.length},${totalVencido},${recaudoMes},${saldoPendiente}\n`;
@@ -735,15 +775,13 @@ export default function App() {
     }
 
     const fechaCalc = new Date(`${fechaCalculoMora}T00:00:00`);
-    let baseVencimiento = new Date(activeClient.fechaPrimerPago || '2021-08-28');
-    let [y, m, d] = (activeClient.fechaPrimerPago || '2021-08-28').split('-');
-    baseVencimiento = new Date(Number(y), Number(m) - 1, Number(d));
+    let [y, m, rawD] = (activeClient.fechaPrimerPago || '2021-08-05').split('-');
+    let baseVencimiento = new Date(Number(y), Number(m) - 1, 5);
 
     for (let i = 1; i <= activeClient.plazoPlan; i++) {
       const yy = baseVencimiento.getFullYear();
       const mm = String(baseVencimiento.getMonth() + 1).padStart(2, '0');
-      const dd = String(baseVencimiento.getDate()).padStart(2, '0');
-      let defaultVencimiento = `${yy}-${mm}-${dd}`;
+      let defaultVencimiento = `${yy}-${mm}-05`;
 
       const custom = customCuotas[activeClient.id]?.[i];
       const isPaidDefault = i <= activeClient.cuotasPagadas;
@@ -752,14 +790,13 @@ export default function App() {
       const currentVencimientoStr = custom?.vencimiento || defaultVencimiento;
       
       const [cy, cm, cd] = currentVencimientoStr.split('-');
-      baseVencimiento = new Date(Number(cy), Number(cm) - 1, Number(cd));
+      baseVencimiento = new Date(Number(cy), Number(cm) - 1, 5);
       baseVencimiento.setMonth(baseVencimiento.getMonth() + 1);
-      baseVencimiento.setDate(5);
 
       if (abonoVal < cuotaVal) {
         const currentVencimiento = new Date(`${currentVencimientoStr}T00:00:00`);
         const timeDiff = fechaCalc.getTime() - currentVencimiento.getTime();
-        const daysLate = Math.ceil(timeDiff / (1000 * 3600 * 24));
+        const daysLate = Math.round(timeDiff / (1000 * 3600 * 24));
 
         if (daysLate > 0) {
           const saldo = Math.max(0, cuotaVal - abonoVal);
@@ -1075,17 +1112,15 @@ export default function App() {
             return `${d}/${m}/${y}`;
           };
 
-          let baseVencimiento = new Date(activeClient.fechaPrimerPago || '2021-08-28');
-          let [y, m, d] = (activeClient.fechaPrimerPago || '2021-08-28').split('-');
-          baseVencimiento = new Date(Number(y), Number(m) - 1, Number(d));
+          let [y, m, rawD] = (activeClient.fechaPrimerPago || '2021-08-05').split('-');
+          let baseVencimiento = new Date(Number(y), Number(m) - 1, 5);
 
           const calculatedRows = Array.from({ length: activeClient.plazoPlan }, (_, idx) => {
             const i = idx + 1;
             
             const yy = baseVencimiento.getFullYear();
             const mm = String(baseVencimiento.getMonth() + 1).padStart(2, '0');
-            const dd = String(baseVencimiento.getDate()).padStart(2, '0');
-            let defaultVencimiento = `${yy}-${mm}-${dd}`;
+            let defaultVencimiento = `${yy}-${mm}-05`;
 
             const custom = customCuotas[activeClient.id]?.[i];
             const isPaidDefault = i <= activeClient.cuotasPagadas;
@@ -1103,9 +1138,8 @@ export default function App() {
             const currentPago = custom?.fechaPago || defaultFechaPago;
 
             const [cy, cm, cd] = currentVenc.split('-');
-            baseVencimiento = new Date(Number(cy), Number(cm) - 1, Number(cd));
+            baseVencimiento = new Date(Number(cy), Number(cm) - 1, 5);
             baseVencimiento.setMonth(baseVencimiento.getMonth() + 1);
-            baseVencimiento.setDate(5);
 
             let rowStatus = "PENDIENTE";
             let rowStatusClass = "text-slate-600";
@@ -1121,7 +1155,7 @@ export default function App() {
               totalCancelado += abonoVal;
             } else {
               const timeDiff = new Date(`${fechaCalculoMora}T00:00:00`).getTime() - new Date(`${currentVenc}T00:00:00`).getTime();
-              const calcDias = Math.floor(timeDiff / (1000 * 3600 * 24));
+              const calcDias = Math.round(timeDiff / (1000 * 3600 * 24));
               if (calcDias > 0) {
                 rowStatus = "VENCIDO";
                 rowStatusClass = "text-red-600 font-bold text-[9px]";
@@ -1426,7 +1460,7 @@ export default function App() {
               <div className="flex gap-4 items-center">
                 <div className="flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded border border-blue-200">
                   <label className="text-xs font-bold text-blue-800">Fecha Cálculo:</label>
-                  <input type="date" value={fechaCalculoMora} onChange={(e) => { setFechaCalculoMora(e.target.value); syncToFirebase({ fechaCalculoMora: e.target.value }); }} className="bg-transparent text-blue-900 font-bold text-xs outline-none" />
+                  <input type="date" value={fechaCalculoMora} onChange={(e) => setFechaCalculoMora(e.target.value)} className="bg-transparent text-blue-900 font-bold text-xs outline-none" title="Cambiar esta fecha solo afecta la vista temporal actual." />
                 </div>
                 <button onClick={() => window.print()} className="px-4 py-1.5 bg-blue-50 text-blue-600 rounded font-bold border border-blue-200 text-xs">Imprimir</button>
               </div>
@@ -1601,11 +1635,12 @@ export default function App() {
           <div className="bg-white shadow-lg rounded-xl border border-slate-100 p-6 print:hidden">
             <h2 className="text-2xl font-bold text-slate-800 mb-6 border-b border-slate-200 pb-4">Reportes y Productividad</h2>
             
-            <div className="mb-6 grid grid-cols-1 md:grid-cols-4 gap-4 bg-slate-50 p-4 rounded-lg border border-slate-200">
+            <div className="mb-6 grid grid-cols-1 md:grid-cols-5 gap-4 bg-slate-50 p-4 rounded-lg border border-slate-200">
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Buscar Cliente</label><input type="text" value={reportSearch} onChange={(e) => setReportSearch(e.target.value)} placeholder="Nombre o ID..." className="w-full rounded border-slate-300 p-2 border text-sm" /></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Estado</label><select value={reportFilterEstado} onChange={(e) => setReportFilterEstado(e.target.value)} className="w-full rounded border-slate-300 p-2 border bg-white text-sm"><option value="Todos">Todos</option><option value="Adjudicado">Adjudicado</option><option value="No Adjudicado">No Adjudicado</option></select></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Ejecutivo</label><select value={reportFilterEjecutivo} onChange={(e) => setReportFilterEjecutivo(e.target.value)} className="w-full rounded border-slate-300 p-2 border bg-white text-sm"><option value="Todos">Todos</option>{Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).map((ej) => (<option key={ej} value={ej}>{ej}</option>))}</select></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Vencidas (Min)</label><input type="number" min="0" value={reportFilterVencidas} onChange={(e) => setReportFilterVencidas(e.target.value)} className="w-full rounded border-slate-300 p-2 border text-sm" /></div>
+              <div><label className="block text-xs font-bold text-slate-700 mb-1">Cobradas (Mes)</label><input type="number" min="0" value={reportFilterCobradas} onChange={(e) => setReportFilterCobradas(e.target.value)} className="w-full rounded border-slate-300 p-2 border text-sm" /></div>
             </div>
 
             <div className="mb-8">
@@ -1620,32 +1655,14 @@ export default function App() {
                       <th className="px-2 py-2 text-left">CLIENTE</th><th className="px-2 py-2 text-left">IDENTIFICACIÓN</th><th className="px-2 py-2 text-left">GRUPO/PLAN</th>
                       <th className="px-2 py-2 text-right">MONTO</th><th className="px-2 py-2 text-center">ESTADO</th><th className="px-2 py-2 text-right">CUOTA MES</th>
                       <th className="px-2 py-2 text-red-600 bg-red-100">VENCIDAS</th><th className="px-2 py-2 text-red-600 bg-red-100">VALOR VENCIDO</th>
-                      <th className="px-2 py-2 text-blue-300">PAGADAS (TOTAL)</th><th className="px-2 py-2 text-emerald-600 bg-emerald-100">COBRADAS (MES)</th>
+                      <th className="px-2 py-2 text-emerald-600 bg-emerald-100">COBRADAS (MES)</th>
                       <th className="px-2 py-2 text-emerald-600 bg-emerald-100">RECAUDO (MES)</th><th className="px-2 py-2 text-amber-600 bg-amber-100">PENDIENTES</th>
                       <th className="px-2 py-2 text-amber-600 bg-amber-100">VALOR PENDIENTE</th><th className="px-2 py-2 text-left">EJECUTIVO</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-slate-200">
                     {filteredReportClients.map((c) => {
-                      const vencidas = calculateVencidas(c);
-                      const valVencido = vencidas * c.valorCuota;
-                      const pagadasTotales = c.cuotasPagadas;
-                      
-                      let cobradasMes = 0;
-                      const calcDate = new Date(fechaCalculoMora);
-                      if (customCuotas[c.id]) {
-                        Object.values(customCuotas[c.id]).forEach((cuota) => {
-                          if (cuota.fechaPago && cuota.abonoVal > 0) {
-                            const d = new Date(cuota.fechaPago);
-                            if (d.getMonth() === calcDate.getMonth() && d.getFullYear() === calcDate.getFullYear()) {
-                              cobradasMes++;
-                            }
-                          }
-                        });
-                      }
-                      const recaudoMes = cobradasMes * c.valorCuota;
-                      const pendientes = c.plazoPlan - c.cuotasPagadas;
-                      const valPendiente = pendientes * c.valorCuota;
+                      const metrics = getReportMetrics(c);
 
                       return (
                         <tr key={c.id} className="hover:bg-slate-50">
@@ -1653,10 +1670,10 @@ export default function App() {
                           <td className="px-2 py-2 text-left font-bold text-slate-700">{c.grupoCodigo}-{c.puesto}</td><td className="px-2 py-2 font-medium text-right">${c.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                           <td className="px-2 py-2 text-center"><span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-bold text-[10px]">{c.estadoPlan}</span></td>
                           <td className="px-2 py-2 font-medium text-right">${c.valorCuota.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
-                          <td className="px-2 py-2 font-bold text-red-600 bg-red-50">{vencidas}</td><td className="px-2 py-2 font-bold text-red-600 bg-red-50 text-right">${valVencido.toFixed(2)}</td>
-                          <td className="px-2 py-2 font-bold text-blue-600 border-l border-slate-100">{pagadasTotales}</td><td className="px-2 py-2 font-bold text-emerald-600 bg-emerald-50">{cobradasMes}</td>
-                          <td className="px-2 py-2 font-bold text-emerald-600 bg-emerald-50 text-right">${recaudoMes.toFixed(2)}</td><td className="px-2 py-2 font-bold text-amber-600 bg-amber-50 border-l border-slate-100">{pendientes}</td>
-                          <td className="px-2 py-2 font-bold text-amber-600 bg-amber-50 text-right">${valPendiente.toFixed(2)}</td><td className="px-2 py-2 text-left border-l border-slate-100">{c.ejecutivoCartera}</td>
+                          <td className="px-2 py-2 font-bold text-red-600 bg-red-50">{metrics.vencidasMeta}</td><td className="px-2 py-2 font-bold text-red-600 bg-red-50 text-right">${metrics.valVencidoMeta.toFixed(2)}</td>
+                          <td className="px-2 py-2 font-bold text-emerald-600 bg-emerald-50 border-l border-slate-100">{metrics.cobradasMes}</td>
+                          <td className="px-2 py-2 font-bold text-emerald-600 bg-emerald-50 text-right">${metrics.recaudoMes.toFixed(2)}</td><td className="px-2 py-2 font-bold text-amber-600 bg-amber-50 border-l border-slate-100">{metrics.pendientes}</td>
+                          <td className="px-2 py-2 font-bold text-amber-600 bg-amber-50 text-right">${metrics.valPendiente.toFixed(2)}</td><td className="px-2 py-2 text-left border-l border-slate-100">{c.ejecutivoCartera}</td>
                         </tr>
                       );
                     })}
@@ -1682,41 +1699,55 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-slate-200">
-                    {Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).map((ej) => {
-                      const ejClients = clients.filter((c) => c.ejecutivoCartera === ej);
-                      
-                      let totalVencido = 0;
-                      let recaudoMes = 0;
-                      let saldoPendiente = 0;
-                      const calcDate = new Date(fechaCalculoMora);
-                      
-                      ejClients.forEach(c => {
-                        const vencidas = calculateVencidas(c);
-                        totalVencido += vencidas * c.valorCuota;
+                    {(() => {
+                      let grandTotalClientes = 0;
+                      let grandTotalVencido = 0;
+                      let grandTotalRecaudo = 0;
+                      let grandTotalPendiente = 0;
+
+                      const rows = Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).map((ej) => {
+                        const ejClients = clients.filter((c) => c.ejecutivoCartera === ej);
                         
-                        let cobradasMes = 0;
-                        if (customCuotas[c.id]) {
-                          Object.values(customCuotas[c.id]).forEach((cuota) => {
-                            if (cuota.fechaPago && cuota.abonoVal > 0) {
-                              const d = new Date(cuota.fechaPago);
-                              if (d.getMonth() === calcDate.getMonth() && d.getFullYear() === calcDate.getFullYear()) cobradasMes++;
-                            }
-                          });
-                        }
-                        recaudoMes += cobradasMes * c.valorCuota;
-                        saldoPendiente += (c.plazoPlan - c.cuotasPagadas) * c.valorCuota;
+                        let totalVencido = 0;
+                        let recaudoMes = 0;
+                        let saldoPendiente = 0;
+                        
+                        ejClients.forEach(c => {
+                          const metrics = getReportMetrics(c);
+                          totalVencido += metrics.valVencidoMeta;
+                          recaudoMes += metrics.recaudoMes;
+                          saldoPendiente += metrics.valPendiente;
+                        });
+
+                        grandTotalClientes += ejClients.length;
+                        grandTotalVencido += totalVencido;
+                        grandTotalRecaudo += recaudoMes;
+                        grandTotalPendiente += saldoPendiente;
+
+                        return (
+                          <tr key={ej} className="hover:bg-slate-50">
+                            <td className="px-4 py-2 font-bold">{ej}</td>
+                            <td className="px-4 py-2 text-center font-medium">{ejClients.length}</td>
+                            <td className="px-4 py-2 text-right text-red-600 font-bold">${totalVencido.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-4 py-2 text-right text-emerald-600 font-bold">${recaudoMes.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-4 py-2 text-right text-amber-600 font-bold">${saldoPendiente.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                          </tr>
+                        );
                       });
 
                       return (
-                        <tr key={ej} className="hover:bg-slate-50">
-                          <td className="px-4 py-2 font-bold">{ej}</td>
-                          <td className="px-4 py-2 text-center font-medium">{ejClients.length}</td>
-                          <td className="px-4 py-2 text-right text-red-600 font-bold">${totalVencido.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
-                          <td className="px-4 py-2 text-right text-emerald-600 font-bold">${recaudoMes.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
-                          <td className="px-4 py-2 text-right text-amber-600 font-bold">${saldoPendiente.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
-                        </tr>
+                        <>
+                          {rows}
+                          <tr className="bg-slate-800 text-white font-black text-sm">
+                            <td className="px-4 py-3 uppercase tracking-wider text-right">TOTAL GENERAL:</td>
+                            <td className="px-4 py-3 text-center">{grandTotalClientes}</td>
+                            <td className="px-4 py-3 text-right text-red-300">${grandTotalVencido.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-4 py-3 text-right text-emerald-400">${grandTotalRecaudo.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-4 py-3 text-right text-amber-300">${grandTotalPendiente.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
+                          </tr>
+                        </>
                       );
-                    })}
+                    })()}
                   </tbody>
                 </table>
               </div>
