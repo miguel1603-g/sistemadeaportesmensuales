@@ -314,39 +314,35 @@ export default function App() {
       fechaPagoEntrada: formData.fechaPagoEntrada || '',
     };
 
-    setClients((prev) => {
-      // 1. Buscamos primero por el ID exacto (Flujo normal de edición)
-      let idx = prev.findIndex((c) => c.id === newClientObj.id);
+    // 1. Buscamos primero por el ID exacto (Flujo normal de edición)
+    let idx = clients.findIndex((c) => c.id === newClientObj.id);
 
-      // 2. PROTECCIÓN CONTRA DUPLICADOS: Si no coincide por ID, verificamos por número de Cédula.
-      // Así evitamos que se duplique un cliente si se crea manualmente con una cédula existente.
-      if (idx === -1) {
-        const idxCedula = prev.findIndex((c) => c.docIdentidad === newClientObj.docIdentidad);
-        if (idxCedula >= 0) {
-          idx = idxCedula;
-          // Forzamos a mantener el ID del registro original que estamos sobreescribiendo
-          newClientObj.id = prev[idx].id; 
-        }
+    // 2. PROTECCIÓN ESTRICTA CONTRA DUPLICADOS: Si no coincide por ID, verificamos por número de Cédula.
+    if (idx === -1) {
+      const idxCedula = clients.findIndex((c) => c.docIdentidad === newClientObj.docIdentidad);
+      if (idxCedula >= 0) {
+        idx = idxCedula;
+        // Forzamos a mantener el ID del registro original que estamos sobreescribiendo
+        newClientObj.id = clients[idx].id; 
       }
+    }
 
-      let newClients;
-      if (idx >= 0) { 
-        // Si lo encontró (por ID o por Cédula), lo actualiza
-        const copy = [...prev]; 
-        copy[idx] = newClientObj; 
-        newClients = copy; 
-      }
-      else { 
-        // Solo si no existe de ninguna forma, crea uno nuevo
-        newClients = [...prev, newClientObj]; 
-      }
-      
-      syncToFirebase({ clients: newClients }); 
-      return newClients;
-    });
+    let newClients;
+    if (idx >= 0) { 
+      // Si lo encontró (por ID o por Cédula), sobrescribe/actualiza los datos existentes
+      const copy = [...clients]; 
+      copy[idx] = newClientObj; 
+      newClients = copy; 
+    } else { 
+      // Solo si no existe de ninguna forma, crea uno nuevo
+      newClients = [...clients, newClientObj]; 
+    }
+
+    setClients(newClients);
+    syncToFirebase({ clients: newClients }); 
 
     setActiveClientId(newClientObj.id);
-    showToast('Cliente guardado/actualizado exitosamente en la nube.', 'success');
+    showToast(`Cliente ${idx >= 0 ? 'actualizado (sobreescrito)' : 'guardado'} exitosamente sin duplicar.`, 'success');
     if (goToTable) switchTab('payment-table');
     else switchTab('dashboard');
   };
@@ -1052,7 +1048,7 @@ export default function App() {
               </div>
               <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-200 pb-2">Valores</h3>
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-1">Monto Base</label>
                     <input type="number" value={formData.montoContratado || ''} onChange={(e) => { 
@@ -1066,6 +1062,10 @@ export default function App() {
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Plazo (Meses)</label><input type="number" value={formData.plazoPlan || ''} onChange={(e) => setFormData({ ...formData, plazoPlan: Number(e.target.value) })} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Cuota</label><input type="number" value={formData.valorCuota || ''} onChange={(e) => { setFormData({ ...formData, valorCuota: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
                   <div><label className="block text-sm font-bold text-slate-700 mb-1">Pagadas</label><input type="number" value={formData.cuotasPagadas || ''} onChange={(e) => { setFormData({ ...formData, cuotasPagadas: Number(e.target.value) }); calculateValues(); }} className="w-full rounded border-slate-300 p-2 border" /></div>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Inscripción</label>
+                    <input type="number" value={formData.valorInscripcion || ''} onChange={(e) => setFormData({ ...formData, valorInscripcion: Number(e.target.value) })} className="w-full rounded border-slate-300 p-2 border" />
+                  </div>
                   <div>
                     <label className="block text-sm font-bold text-blue-800 mb-1">Valor Total del Plan</label>
                     <div className="w-full rounded border border-blue-300 p-2 bg-blue-50 font-black text-blue-900 shadow-sm flex items-center h-[42px]">
