@@ -77,6 +77,7 @@ interface CustomCuota {
   vencimiento: string;
   fechaPago: string;
   estadoOverride?: string;
+  abonoImportado?: number;
 }
 
 export default function App() {
@@ -95,6 +96,11 @@ export default function App() {
   
   const dHoy = new Date();
   const todayStr = `${dHoy.getFullYear()}-${String(dHoy.getMonth() + 1).padStart(2, '0')}-${String(dHoy.getDate()).padStart(2, '0')}`;
+  
+  // NUEVO: Estado para controlar qué mes se muestra en los reportes (Por defecto: mes actual)
+  const defaultReportMonth = `${dHoy.getFullYear()}-${String(dHoy.getMonth() + 1).padStart(2, '0')}`;
+  const [reportMonth, setReportMonth] = useState(defaultReportMonth);
+  
   const [fechaCalculoMora, setFechaCalculoMora] = useState(todayStr);
 
   const [moraParams, setMoraParams] = useState<MoraParam[]>([
@@ -148,6 +154,17 @@ export default function App() {
     setTimeout(() => setToast({ show: false, message: '', type: 'info' }), 6000);
   };
 
+  const triggerPrint = () => {
+    // Detectamos si estamos en una Vista Previa / Iframe incrustado
+    if (window.self !== window.top) {
+      showToast("⚠️ NAVEGADOR BLOQUEADO: Estás en una Vista Previa. Abre tu sistema en una nueva pestaña (Ej: Vercel) para poder imprimir.", "error");
+    }
+    // Damos un pequeño respiro de 100ms y lanzamos la impresión
+    setTimeout(() => {
+      window.print();
+    }, 100);
+  };
+
   useEffect(() => {
     if (!auth) return;
 
@@ -188,7 +205,6 @@ export default function App() {
         if (data.descCobranza) setDescCobranza(data.descCobranza);
         if (data.moraParams) setMoraParams(data.moraParams);
         if (data.cobranzaParams) setCobranzaParams(data.cobranzaParams);
-        // Eliminamos la sincronización de la fecha de cálculo para que SIEMPRE sea "hoy" al abrir la app.
       }
     }, (error: any) => {
       setIsOnline(false);
@@ -215,7 +231,8 @@ export default function App() {
     });
 
     const docRef = doc(db, 'sistema_aportes', 'base_principal');
-    setDoc(docRef, payload).catch(e => {
+    // CAPA DE SEGURIDAD: merge true previene sobreescrituras destructivas completas
+    setDoc(docRef, payload, { merge: true }).catch(e => {
       console.error("Error guardando:", e);
       showToast("No se pudo guardar en la nube. Revisa las reglas de Firestore.", "error");
     });
@@ -264,7 +281,6 @@ export default function App() {
     setFormData((prev) => ({ ...prev, valorTotalPagado: cuotas * cuotaVal }));
   };
 
-  // Función compartida para formatear Puesto (ej: 3 -> 003-1)
   const formatearPuesto = (puestoRaw: any) => {
     if (!puestoRaw || puestoRaw === 'undefined' || puestoRaw === 'null') return 'Sin Puesto';
     let p = String(puestoRaw).replace(/\s+/g, '');
@@ -275,7 +291,7 @@ export default function App() {
       parts[0] = parts[0].padStart(3, '0');
       return parts.join('-');
     } else {
-      return p.padStart(3, '0') + '-1'; // Asigna -1 automáticamente si no tiene guión
+      return p.padStart(3, '0') + '-1';
     }
   };
 
@@ -285,7 +301,6 @@ export default function App() {
       return;
     }
     
-    // Normalizamos el puesto en caso de creación o edición manual
     const formattedPuesto = formatearPuesto(formData.puesto);
 
     const newClientObj: Client = {
@@ -314,27 +329,22 @@ export default function App() {
       fechaPagoEntrada: formData.fechaPagoEntrada || '',
     };
 
-    // 1. Buscamos primero por el ID exacto (Flujo normal de edición)
     let idx = clients.findIndex((c) => c.id === newClientObj.id);
 
-    // 2. PROTECCIÓN ESTRICTA CONTRA DUPLICADOS: Si no coincide por ID, verificamos por número de Cédula.
     if (idx === -1) {
       const idxCedula = clients.findIndex((c) => c.docIdentidad === newClientObj.docIdentidad);
       if (idxCedula >= 0) {
         idx = idxCedula;
-        // Forzamos a mantener el ID del registro original que estamos sobreescribiendo
         newClientObj.id = clients[idx].id; 
       }
     }
 
     let newClients;
     if (idx >= 0) { 
-      // Si lo encontró (por ID o por Cédula), sobrescribe/actualiza los datos existentes
       const copy = [...clients]; 
       copy[idx] = newClientObj; 
       newClients = copy; 
     } else { 
-      // Solo si no existe de ninguna forma, crea uno nuevo
       newClients = [...clients, newClientObj]; 
     }
 
@@ -413,7 +423,6 @@ export default function App() {
           };
           if (!row || row.length === 0 || !getCol(['cliente', 'nombre'])) return null;
 
-          // Función robusta para limpiar y convertir números de Excel (Ej. $1,000.50 y $1.000,50)
           const cleanNumber = (val: any) => {
             if (typeof val === 'number') return val;
             if (!val) return 0;
@@ -427,13 +436,9 @@ export default function App() {
             return isNaN(n) ? 0 : n;
           };
 
-          // =========================================================
-          // LECTURA ESTRICTA Y FORMATEO
-          // =========================================================
           let rawPuesto = row[1] !== undefined ? String(row[1]) : getCol(['puesto', 'cargo']);
           let puestoExcel = formatearPuesto(rawPuesto);
           
-          // FORZAR LECTURA COLUMNA G (Índice 6 - Monto) - ESTRICTO A CERO SI ESTÁ VACÍO
           let montoExcel = 0;
           if (row[6] !== undefined && row[6] !== null && String(row[6]).trim() !== '') {
               montoExcel = cleanNumber(row[6]);
@@ -443,7 +448,7 @@ export default function App() {
           }
           if (isNaN(montoExcel) || montoExcel < 0) montoExcel = 0; 
 
-          // FORZAR LECTURA COLUMNA H (Índice 7 - Cuota) - ESTRICTO A CERO SI ESTÁ VACÍO
+          // COLUMNA H (Índice 7) -> CUOTA
           let cuotaExcel = 0;
           if (row[7] !== undefined && row[7] !== null && String(row[7]).trim() !== '') {
               cuotaExcel = cleanNumber(row[7]);
@@ -453,7 +458,6 @@ export default function App() {
           }
           if (isNaN(cuotaExcel) || cuotaExcel <= 0) cuotaExcel = 0; 
 
-          // EXTRACCIÓN ESTRICTA DE LA CÉDULA (Columna L = Índice 11)
           let docExcel = row[11] !== undefined && String(row[11]).trim() !== '' 
             ? String(row[11]).trim() 
             : getCol(['cedula', 'identificaci', 'documento']);
@@ -462,10 +466,33 @@ export default function App() {
              docExcel = `9999999${index}`;
           }
 
+          // EXTRACCION DE LA FECHA DE ENTREGA (Columna S, índice 18)
+          let fechaEntregaExcel = row[18] !== undefined && String(row[18]).trim() !== ''
+            ? String(row[18]).trim()
+            : getCol(['entrega']);
+
           const cuotasPagadas = parseInt(getCol(['cobradas', 'pagadas'])) || 0;
-          let rawVencidas = getCol(['vencida', 'mora']);
+          
+          // COLUMNA I (Índice 8) -> VENCIDAS
+          let rawVencidas = row[8] !== undefined ? String(row[8]) : getCol(['vencida', 'mora']);
           if (!rawVencidas && row.length > 8) rawVencidas = String(row[8] || '').trim();
           const vencidasExcel = parseInt(rawVencidas, 10) || 0;
+
+          // =========================================================================
+          // DETECCIÓN DE ABONO (Diferencia entre Cuotas Vencidas y Valor Vencido)
+          // =========================================================================
+          let rawVencidos = row[9] !== undefined ? String(row[9]) : getCol(['vencidos', 'valor vencido']);
+          let valorVencidoExcel = cleanNumber(rawVencidos);
+
+          let abonoImportado = 0;
+          let valorTeorico = cuotaExcel * vencidasExcel;
+          
+          if (vencidasExcel > 0 && valorTeorico > 0) {
+              if (valorVencidoExcel < valorTeorico && valorVencidoExcel >= 0) {
+                  abonoImportado = parseFloat((valorTeorico - valorVencidoExcel).toFixed(2));
+              }
+          }
+          // =========================================================================
 
           let fechaPrimerPago = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-05`;
           const expectedCuotas = cuotasPagadas + vencidasExcel;
@@ -495,7 +522,9 @@ export default function App() {
             fechaPrimerPago: fechaPrimerPago,
             valorTotalPagado: 0,
             vencidasExcel: vencidasExcel,
-            valorEntrada: 0
+            valorEntrada: 0,
+            fechaEntrega: fechaEntregaExcel,
+            abonoImportado: abonoImportado // Propiedad temporal para usarla en importDataFromPreview
           };
         }).filter((item) => item !== null);
         
@@ -511,18 +540,60 @@ export default function App() {
 
   const importDataFromPreview = () => {
     if (previewData.length === 0) return;
-    const validatedData = previewData.map((d) => ({
-      ...d,
-      valorTotalPagado: d.cuotasPagadas * d.valorCuota,
-      id: Date.now().toString() + Math.random().toString(36).substring(2, 9)
-    }));
-    setClients((prev) => {
-      const newClients = [...prev, ...validatedData];
-      syncToFirebase({ clients: newClients });
-      return newClients;
+    
+    const newClients: Client[] = [];
+    const newCustomCuotas = { ...customCuotas };
+    const newGestiones = { ...gestiones };
+    
+    previewData.forEach((d) => {
+      const newId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+      
+      const clientObj = {
+        ...d,
+        id: newId,
+        valorTotalPagado: d.cuotasPagadas * d.valorCuota,
+      };
+      
+      delete clientObj.abonoImportado; 
+      
+      newClients.push(clientObj as Client);
+      
+      // REGISTRAR ABONO A LA CUOTA SIGUIENTE (Primera cuota vencida)
+      if (d.abonoImportado > 0 && d.vencidasExcel > 0) {
+         const numCuotaAbono = d.cuotasPagadas + 1;
+         
+         let [y, m] = (clientObj.fechaPrimerPago || '2021-08-05').split('-').map(Number);
+         let dDate = new Date(y, m - 1, 5);
+         dDate.setMonth(dDate.getMonth() + (numCuotaAbono - 1));
+         const vv = `${dDate.getFullYear()}-${String(dDate.getMonth() + 1).padStart(2, '0')}-05`;
+         
+         if (!newCustomCuotas[newId]) newCustomCuotas[newId] = {};
+         newCustomCuotas[newId][numCuotaAbono] = {
+            num: numCuotaAbono,
+            cuotaVal: d.valorCuota,
+            abonoVal: d.abonoImportado, 
+            vencimiento: vv,
+            fechaPago: '',
+            abonoImportado: d.abonoImportado
+         };
+         
+         const note = `Abono a la cuota #${numCuotaAbono} calculado en la importación por diferencia de saldos: $${d.abonoImportado.toFixed(2)}`;
+         const item = { fecha: new Date().toLocaleString(), texto: note };
+         if (!newGestiones[newId]) newGestiones[newId] = [];
+         newGestiones[newId].push(item);
+      }
     });
+
+    setClients((prev) => {
+      const combined = [...prev, ...newClients];
+      syncToFirebase({ clients: combined, customCuotas: newCustomCuotas, gestiones: newGestiones });
+      return combined;
+    });
+    
+    setCustomCuotas(newCustomCuotas);
+    setGestiones(newGestiones);
     setPreviewData([]);
-    showToast(`${validatedData.length} clientes subidos a la Nube.`, "success");
+    showToast(`${newClients.length} clientes subidos a la Nube.`, "success");
     switchTab('dashboard');
   };
 
@@ -575,6 +646,16 @@ export default function App() {
 
       const updatedClientData = { ...clientData };
       updatedClientData[quotaNum] = { ...existingCuota, [field]: value };
+
+      // AUTODETECTAR FECHA DE PAGO: Si el asesor ingresa un abono y olvida la fecha, ponemos la de hoy.
+      if (field === 'abonoVal') {
+        if (Number(value) > 0 && !updatedClientData[quotaNum].fechaPago) {
+          const today = new Date();
+          updatedClientData[quotaNum].fechaPago = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        } else if (Number(value) === 0) {
+          updatedClientData[quotaNum].fechaPago = '';
+        }
+      }
 
       if (field === 'vencimiento' && typeof value === 'string') {
         let [y, m] = value.split('-').map(Number);
@@ -637,12 +718,13 @@ export default function App() {
 
   const getReportMetrics = (c: Client) => {
     let vencidasMeta = 0;
+    let valVencidoMeta = 0;
     let cobradasMes = 0;
     let recaudoMes = 0;
     let pagadasTotal = 0;
     
-    const currentMonth = new Date().getMonth() + 1;
-    const currentYear = new Date().getFullYear();
+    // FILTRO DINÁMICO DE MES BASADO EN reportMonth
+    const [selYear, selMonth] = reportMonth.split('-').map(Number);
     const fechaCalc = new Date(`${fechaCalculoMora}T00:00:00`).getTime();
     
     let [y, m, d] = (c.fechaPrimerPago || '2021-08-05').split('-');
@@ -658,9 +740,14 @@ export default function App() {
       const cuotaVal = custom?.cuotaVal ?? c.valorCuota;
       const abonoVal = custom?.abonoVal ?? (isPaidDefault ? c.valorCuota : 0);
       const currentVenc = custom?.vencimiento || defaultVencimiento;
-      const fechaPagoStr = custom?.fechaPago || (isPaidDefault ? currentVenc : '');
+      
+      // REGLA DE NEGOCIO: Ignoramos las fechas por defecto del Excel para reportes.
+      // Solo suman a la recaudación del ejecutivo los pagos registrados en el sistema.
+      const fechaPagoStr = custom?.fechaPago || '';
 
-      if (abonoVal >= cuotaVal) {
+      const isFullyPaid = abonoVal >= cuotaVal;
+
+      if (isFullyPaid) {
         pagadasTotal++;
       }
 
@@ -668,16 +755,22 @@ export default function App() {
       baseVencimiento = new Date(Number(cy), Number(cm) - 1, 5);
       baseVencimiento.setMonth(baseVencimiento.getMonth() + 1);
 
-      let isPaidThisMonth = false;
+      const abonoImportadoBaseline = custom?.abonoImportado || 0;
+      let isPaidSelectedMonth = false;
+      let abonoRecaudadoMes = 0;
+
       if (fechaPagoStr && abonoVal > 0) {
         const parts = fechaPagoStr.split('-');
         if (parts.length >= 2) {
           const py = parseInt(parts[0], 10);
           const pm = parseInt(parts[1], 10);
-          if (py === currentYear && pm === currentMonth) {
-            isPaidThisMonth = true;
-            cobradasMes++;
-            recaudoMes += abonoVal;
+          if (py === selYear && pm === selMonth) { // Evaluamos contra el mes seleccionado por el usuario
+            isPaidSelectedMonth = true;
+            abonoRecaudadoMes = Math.max(0, abonoVal - abonoImportadoBaseline);
+            recaudoMes += abonoRecaudadoMes;
+            if (isFullyPaid) {
+              cobradasMes++;
+            }
           }
         }
       }
@@ -685,17 +778,19 @@ export default function App() {
       const timeDiff = fechaCalc - new Date(`${currentVenc}T00:00:00`).getTime();
       const daysLate = Math.round(timeDiff / (1000 * 3600 * 24));
       
+      const saldoCuota = Math.max(0, cuotaVal - abonoVal);
+      
       if (daysLate > 0) {
-        // Mantiene la cuota en "VENCIDAS" si no ha sido pagada en MESES ANTERIORES.
-        // Si la pagó ESTE MES, sigue contando como Vencida-Meta para que la resta con Cobradas sea exacta.
-        const isPaidPreviousMonths = (abonoVal >= cuotaVal) && !isPaidThisMonth;
-        if (!isPaidPreviousMonths) {
+        if (saldoCuota > 0) {
           vencidasMeta++;
+          valVencidoMeta += saldoCuota + abonoRecaudadoMes;
+        } else if (isPaidSelectedMonth && isFullyPaid) {
+          vencidasMeta++;
+          valVencidoMeta += (cuotaVal - abonoImportadoBaseline);
         }
       }
     }
     
-    const valVencidoMeta = vencidasMeta * c.valorCuota;
     const pendientes = vencidasMeta - cobradasMes;
     const valPendiente = valVencidoMeta - recaudoMes;
     
@@ -723,17 +818,56 @@ export default function App() {
     return matchesSearch && matchesEstado && matchesEjecutivo && matchesVencidas && matchesCobradas;
   });
 
-  const exportToExcel = (type: string) => {
-    let csvContent = 'data:text/csv;charset=utf-8,';
+  // Exportar Nativo a Excel (.xlsx)
+  const exportToExcel = async (type: string) => {
+    if (!(window as any).XLSX) {
+      showToast("Cargando motor de Excel para exportar...", "info");
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+          script.onload = () => resolve();
+          script.onerror = () => reject();
+          document.head.appendChild(script);
+        });
+      } catch (error) {
+        showToast("No se pudo cargar el motor de Excel. Verifica tu conexión.", "error");
+        return;
+      }
+    }
+
+    const XLSX = (window as any).XLSX;
+
     if (type === 'general') {
-      csvContent += 'CLIENTE,IDENTIFICACIÓN,GRUPO / CÓDIGO,MONTO,ESTADO,CUOTA MES,PAGADAS (TOTAL),VENCIDAS,VALOR VENCIDO,COBRADAS (MES),RECAUDO (MES),PENDIENTES,VALOR PENDIENTE,EJECUTIVO\n';
-      filteredReportClients.forEach((c) => {
+      const exportData = filteredReportClients.map((c) => {
         const metrics = getReportMetrics(c);
-        csvContent += `"${c.nombres}","${c.docIdentidad}","${c.grupoCodigo}-${c.puesto}",${c.montoContratado},"${c.estadoPlan}",${c.valorCuota},${metrics.pagadasTotal},${metrics.vencidasMeta},${metrics.valVencidoMeta},${metrics.cobradasMes},${metrics.recaudoMes},${metrics.pendientes},${metrics.valPendiente},"${c.ejecutivoCartera}"\n`;
+        return {
+          'CLIENTE': c.nombres,
+          'IDENTIFICACIÓN': c.docIdentidad,
+          'GRUPO / CÓDIGO': `${c.grupoCodigo}-${c.puesto}`,
+          'MONTO': c.montoContratado,
+          'ESTADO': c.estadoPlan,
+          'ENTREGA': c.fechaEntrega ? 'CON BIEN' : 'SIN BIEN',
+          'CUOTA MES': c.valorCuota,
+          'PAGADAS (TOTAL)': metrics.pagadasTotal,
+          'VENCIDAS': metrics.vencidasMeta,
+          'VALOR VENCIDO': metrics.valVencidoMeta,
+          'COBRADAS (MES)': metrics.cobradasMes,
+          'RECAUDO (MES)': metrics.recaudoMes,
+          'PENDIENTES': metrics.pendientes,
+          'VALOR PENDIENTE': metrics.valPendiente,
+          'EJECUTIVO': c.ejecutivoCartera
+        };
       });
+
+      const worksheet = XLSX.utils.json_to_sheet(exportData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, `Reporte General (${reportMonth})`);
+      XLSX.writeFile(workbook, `Reporte_General_${reportMonth}.xlsx`);
+
     } else if (type === 'ejecutivos') {
-      csvContent += 'EJECUTIVO DE CARTERA,TOTAL CLIENTES,TOTAL VENCIDO,RECAUDO (MES),SALDO PENDIENTE\n';
-      Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).forEach((ej) => {
+      const ejecutivosSet = Array.from(new Set(clients.map((c) => c.ejecutivoCartera)));
+      const exportData = ejecutivosSet.map((ej) => {
         const ejClients = clients.filter((c) => c.ejecutivoCartera === ej);
         let totalVencido = 0;
         let recaudoMes = 0;
@@ -746,14 +880,20 @@ export default function App() {
           saldoPendiente += metrics.valPendiente;
         });
 
-        csvContent += `"${ej}",${ejClients.length},${totalVencido},${recaudoMes},${saldoPendiente}\n`;
+        return {
+          'EJECUTIVO DE CARTERA': ej,
+          'TOTAL CLIENTES': ejClients.length,
+          'TOTAL VENCIDO': totalVencido,
+          'RECAUDO (MES)': recaudoMes,
+          'SALDO PENDIENTE': saldoPendiente
+        };
       });
+
+      const worksheet = XLSX.utils.json_to_sheet(exportData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, `Reporte Ejecutivos (${reportMonth})`);
+      XLSX.writeFile(workbook, `Reporte_Ejecutivos_${reportMonth}.xlsx`);
     }
-    const link = document.createElement("a");
-    link.setAttribute("href", encodeURI(csvContent));
-    link.setAttribute("download", `reporte_${type}_${new Date().getTime()}.csv`);
-    document.body.appendChild(link);
-    link.click();
   };
 
   let pendingQuotas: any[] = [];
@@ -818,7 +958,20 @@ export default function App() {
           const moraTotal = moraBase * (1 - descM / 100);
           const cobranzaTotal = cobranzaBase * (1 - descC / 100);
           
-          pendingQuotas.push({ num: i, vencimientoStr: currentVencimientoStr, daysLate, saldo, moraBase, cobranzaBase, descM, descC, totalRow: saldo + moraTotal + cobranzaTotal });
+          pendingQuotas.push({ 
+            num: i, 
+            vencimientoStr: currentVencimientoStr, 
+            fechaPagoStr: custom?.fechaPago || (isPaidDefault ? currentVencimientoStr : ''),
+            daysLate, 
+            cuotaVal,
+            abonoVal,
+            saldo, 
+            moraBase, 
+            cobranzaBase, 
+            descM, 
+            descC, 
+            totalRow: saldo + moraTotal + cobranzaTotal 
+          });
           subtotalVencidas += saldo; subtotalMora += moraTotal; subtotalCobranzas += cobranzaTotal;
         }
       }
@@ -914,7 +1067,7 @@ export default function App() {
                       <tr>
                         <th className="px-4 py-3 text-left">Grupo / Código</th><th className="px-4 py-3 text-left">Ciudad</th>
                         <th className="px-4 py-3 text-left">IDCodigo</th><th className="px-4 py-3 text-left">Cliente</th><th className="px-4 py-3 text-left">Tel. Celular</th>
-                        <th className="px-4 py-3 text-left">Monto</th><th className="px-4 py-3 text-left">Cuota</th><th className="px-4 py-3 text-left">Vencidas</th>
+                        <th className="px-4 py-3 text-left">Monto</th><th className="px-4 py-3 text-left">Cuota</th><th className="px-4 py-3 text-left">Vencidas</th><th className="px-4 py-3 text-left">Abono Det.</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-slate-100">
@@ -922,7 +1075,8 @@ export default function App() {
                         <tr key={idx} className="hover:bg-slate-50">
                           <td className="px-4 py-3 font-bold text-blue-800">{c.grupoCodigo}-{c.puesto}</td><td className="px-4 py-3 text-slate-500">{c.ciudad}</td>
                           <td className="px-4 py-3 text-slate-500">{c.docIdentidad}</td><td className="px-4 py-3 font-semibold text-slate-800">{c.nombres}</td><td className="px-4 py-3 text-slate-500">{c.celular}</td>
-                          <td className="px-4 py-3 text-slate-600">${c.montoContratado}</td><td className="px-4 py-3 text-slate-600">${c.valorCuota}</td><td className="px-4 py-3 text-slate-500">{c.vencidasExcel}</td>
+                          <td className="px-4 py-3 text-slate-600">{c.montoContratado}</td><td className="px-4 py-3 text-slate-600">{c.valorCuota}</td><td className="px-4 py-3 text-slate-500">{c.vencidasExcel}</td>
+                          <td className="px-4 py-3 text-emerald-600 font-bold">{c.abonoImportado > 0 ? `$${c.abonoImportado.toFixed(2)}` : '-'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1200,7 +1354,7 @@ export default function App() {
               canceladasCount++;
               totalCancelado += abonoVal;
             } else {
-              const timeDiff = new Date(`${fechaCalculoMora}T00:00:00`).getTime() - new Date(`${currentVenc}T00:00:00`).getTime();
+              const timeDiff = new Date(`${fechaCalculoMora}T00:00:00`).getTime()-new Date(`${currentVenc}T00:00:00`).getTime();
               const calcDias = Math.round(timeDiff / (1000 * 3600 * 24));
               if (calcDias > 0) {
                 rowStatus = "VENCIDO";
@@ -1231,7 +1385,7 @@ export default function App() {
                   </div>
                   <div className="flex gap-2 w-full sm:w-auto mt-4 sm:mt-0">
                     <button onClick={guardarTabla} className="w-full sm:w-auto flex justify-center items-center px-4 py-2 bg-blue-600 text-white rounded-md font-bold shadow-sm hover:bg-blue-700">Guardar Tabla</button>
-                    <button onClick={() => window.print()} className="w-full sm:w-auto flex justify-center items-center px-4 py-2 bg-emerald-600 text-white rounded-md font-bold shadow-sm hover:bg-emerald-700">Imprimir Reporte</button>
+                    <button onClick={triggerPrint} className="w-full sm:w-auto flex justify-center items-center px-4 py-2 bg-emerald-600 text-white rounded-md font-bold shadow-sm hover:bg-emerald-700">Imprimir Reporte</button>
                   </div>
                 </div>
 
@@ -1399,7 +1553,7 @@ export default function App() {
               </div>
 
               {/* VISTA IMPRESIÓN */}
-              <div className="hidden print:block w-full bg-white text-slate-900 font-sans p-0 m-0 [-webkit-print-color-adjust:exact] [color-adjust:exact]">
+              <div className="hidden print:!block w-full bg-white text-slate-900 font-sans p-0 m-0 [-webkit-print-color-adjust:exact] [color-adjust:exact]">
                 <div className="flex justify-between items-end mb-2">
                   <div className="w-48 h-16 flex items-end justify-start">
                     {logoUrl ? <img src={logoUrl} alt="Logo" className="max-h-full object-contain" /> : <div className="w-full h-full"></div>}
@@ -1513,24 +1667,40 @@ export default function App() {
             PESTAÑA 4: MORA Y COBRANZAS
             ========================================= */}
         {activeTab === 'mora-cobranzas' && activeClient && (
-          <div className="bg-white shadow-lg rounded-xl border border-slate-100 p-6 print:hidden max-w-[1300px] mx-auto">
-            <div className="flex justify-between items-center mb-6">
-              <div className="flex gap-4 items-center">
+          <div className="bg-white shadow-lg rounded-xl border border-slate-100 p-6 print:p-0 print:shadow-none print:border-none max-w-[1300px] mx-auto">
+            
+            {/* ENCABEZADO EXCLUSIVO PARA IMPRESIÓN */}
+            <div className="hidden print:!flex justify-between items-end mb-6 border-b-2 border-slate-900 pb-4">
+              <div className="w-48 h-16 flex items-end justify-start">
+                {logoUrl ? <img src={logoUrl} alt="Logo" className="max-h-full object-contain" /> : <div className="w-full h-full"></div>}
+              </div>
+              <div className="text-right">
+                <h1 className="text-2xl font-black uppercase text-[#0f172a] tracking-tight m-0 leading-none">REPORTE DE MORA Y COBRANZAS</h1>
+                <h2 className="text-[10px] font-medium text-slate-500 m-0 mt-1">Calculado al: {fechaCalculoMora.split('-').reverse().join('/')}</h2>
+              </div>
+            </div>
+
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-6 gap-4">
+              <div className="flex flex-wrap gap-4 items-center print:text-xs">
                 <span className="font-medium text-slate-500">Cliente: <span className="font-bold text-slate-800 uppercase ml-1">{activeClient.nombres}</span></span>
                 <span className="font-medium text-slate-500">Cédula: <span className="font-bold text-slate-800 ml-1">{activeClient.docIdentidad}</span></span>
                 <span className="font-medium text-slate-500">Plan: <span className="font-semibold text-slate-700 ml-1">{activeClient.tipoPlan} - {activeClient.estadoPlan}</span></span>
                 <span className="font-medium text-slate-500">Estado: <span className="px-2 py-1 rounded bg-emerald-100 text-emerald-800 font-bold uppercase text-xs ml-1">{activeClient.estadoActivo}</span></span>
               </div>
-              <div className="flex gap-4 items-center">
+              <div className="flex flex-wrap gap-3 items-center print:hidden">
+                <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200">
+                  <label className="text-xs font-bold text-slate-700">Logo:</label>
+                  <input type="file" accept="image/*" onChange={handleImageUpload} className="w-40 text-[10px] text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-blue-100 file:text-blue-700 cursor-pointer" />
+                </div>
                 <div className="flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded border border-blue-200">
                   <label className="text-xs font-bold text-blue-800">Fecha Cálculo:</label>
                   <input type="date" value={fechaCalculoMora} onChange={(e) => setFechaCalculoMora(e.target.value)} className="bg-transparent text-blue-900 font-bold text-xs outline-none" title="Cambiar esta fecha solo afecta la vista temporal actual." />
                 </div>
-                <button onClick={() => window.print()} className="px-4 py-1.5 bg-blue-50 text-blue-600 rounded font-bold border border-blue-200 text-xs">Imprimir</button>
+                <button onClick={triggerPrint} className="px-4 py-1.5 bg-blue-600 text-white rounded font-bold border border-blue-700 hover:bg-blue-700 text-xs shadow-sm">Imprimir</button>
               </div>
             </div>
 
-            <div className="grid grid-cols-5 gap-4 mb-6 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6 text-sm">
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">GRUPO / CÓDIGO</p><p className="font-bold text-blue-700">{activeClient.grupoCodigo}-{activeClient.puesto}</p></div>
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">MONTO CONTRATADO</p><p className="font-bold text-slate-700">${activeClient.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</p></div>
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">PLAZO CONTRATO</p><p className="font-bold text-slate-700">{activeClient.plazoPlan} Meses</p></div>
@@ -1538,8 +1708,9 @@ export default function App() {
               <div className="p-3 border rounded border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase">DÍA DE PAGO</p><p className="font-bold text-blue-700">5 de cada mes</p></div>
             </div>
 
-            <div className="grid grid-cols-12 gap-8">
-              <div className="col-span-12 md:col-span-4 space-y-6">
+            <div className="grid grid-cols-12 gap-8 print:flex print:flex-col">
+              <div className="col-span-12 md:col-span-4 space-y-6 print:hidden">
+                
                 <div className="border border-slate-200 rounded p-4">
                   <h4 className="font-bold text-slate-800 mb-4 text-sm">Tasa Administrativa Anual</h4>
                   <div className="flex gap-4">
@@ -1607,15 +1778,17 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+
               </div>
 
-              <div className="col-span-12 md:col-span-8 space-y-6">
+              <div className="col-span-12 md:col-span-8 space-y-6 print:w-full">
+                
                 <div className="border border-slate-200 rounded shadow-sm overflow-hidden bg-white">
                   <table className="w-full text-xs text-center">
                     <thead className="bg-[#1e293b] text-white">
                       <tr>
                         <th className="p-2 text-[10px]">CUOTA</th><th className="p-2 text-[10px]">VENCE</th><th className="p-2 text-[10px]">DÍAS</th>
-                        <th className="p-2 text-[10px]">SALDO</th><th className="p-2 text-[10px] text-amber-400">MORA</th>
+                        <th className="p-2 text-[10px]">SALDO</th><th className="p-2 text-[10px] text-emerald-400">ABONO</th><th className="p-2 text-[10px] text-amber-400">MORA</th>
                         <th className="p-2 text-[10px] text-emerald-400">% DESC M.</th><th className="p-2 text-[10px] text-red-400">COBRANZA</th>
                         <th className="p-2 text-[10px] text-emerald-400">% DESC C.</th><th className="p-2 text-[10px] text-blue-300">TOTAL</th>
                       </tr>
@@ -1627,6 +1800,11 @@ export default function App() {
                           <td className="p-2">{q.vencimientoStr}</td>
                           <td className="p-2 font-bold text-red-500">{q.daysLate}</td>
                           <td className="p-2 font-bold">${q.saldo.toFixed(2)}</td>
+                          <td className="p-2">
+                            <div className="inline-block border border-slate-200 rounded px-1 py-0.5 bg-white hover:border-emerald-400 focus-within:border-emerald-500 transition-colors">
+                              <input type="number" step="0.01" value={q.abonoVal} onChange={(e) => handleCuotaEdit(activeClient.id, q.num, 'abonoVal', Number(e.target.value), q.vencimientoStr, q.fechaPagoStr)} className="w-16 text-center bg-transparent outline-none font-bold text-emerald-700 text-xs" />
+                            </div>
+                          </td>
                           <td className="p-2 font-bold text-amber-500">${q.moraBase.toFixed(2)}</td>
                           <td className="p-2">
                             <input type="number" min="0" max="100" value={q.descM} onChange={(e) => {
@@ -1645,7 +1823,7 @@ export default function App() {
                         </tr>
                       ))}
                       {pendingQuotas.length === 0 && (
-                        <tr><td colSpan={9} className="p-4 text-slate-400 font-medium text-sm">No hay cuotas atrasadas registradas hasta la fecha de cálculo.</td></tr>
+                        <tr><td colSpan={10} className="p-4 text-slate-400 font-medium text-sm">No hay cuotas atrasadas registradas hasta la fecha de cálculo.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -1673,7 +1851,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="border border-slate-200 rounded p-5 shadow-sm bg-white">
+                <div className="border border-slate-200 rounded p-5 shadow-sm bg-white print:hidden">
                   <h4 className="font-bold text-slate-800 mb-3 text-sm">Historial de Gestiones</h4>
                   <div className="mb-3">
                     <textarea rows={2} value={nuevaGestion} onChange={(e) => setNuevaGestion(e.target.value)} placeholder="Ingrese los detalles de la gestión, acuerdos o llamadas realizadas..." className="w-full rounded border-slate-300 p-2 border text-sm outline-none focus:border-blue-400" />
@@ -1687,6 +1865,7 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+
               </div>
             </div>
           </div>
@@ -1699,7 +1878,11 @@ export default function App() {
           <div className="bg-white shadow-lg rounded-xl border border-slate-100 p-6 print:hidden">
             <h2 className="text-2xl font-bold text-slate-800 mb-6 border-b border-slate-200 pb-4">Reportes y Productividad</h2>
             
-            <div className="mb-6 grid grid-cols-1 md:grid-cols-5 gap-4 bg-slate-50 p-4 rounded-lg border border-slate-200">
+            <div className="mb-6 grid grid-cols-1 md:grid-cols-6 gap-4 bg-slate-50 p-4 rounded-lg border border-slate-200">
+              <div>
+                <label className="block text-xs font-bold text-blue-700 mb-1">Mes a Consultar</label>
+                <input type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} className="w-full rounded border-blue-300 p-2 border text-sm bg-blue-50 font-bold text-blue-900 shadow-sm" />
+              </div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Buscar Cliente</label><input type="text" value={reportSearch} onChange={(e) => setReportSearch(e.target.value)} placeholder="Nombre o ID..." className="w-full rounded border-slate-300 p-2 border text-sm" /></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Estado</label><select value={reportFilterEstado} onChange={(e) => setReportFilterEstado(e.target.value)} className="w-full rounded border-slate-300 p-2 border bg-white text-sm"><option value="Todos">Todos</option><option value="Adjudicado">Adjudicado</option><option value="No Adjudicado">No Adjudicado</option></select></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Ejecutivo</label><select value={reportFilterEjecutivo} onChange={(e) => setReportFilterEjecutivo(e.target.value)} className="w-full rounded border-slate-300 p-2 border bg-white text-sm"><option value="Todos">Todos</option>{Array.from(new Set(clients.map((c) => c.ejecutivoCartera))).map((ej) => (<option key={ej} value={ej}>{ej}</option>))}</select></div>
@@ -1709,15 +1892,18 @@ export default function App() {
 
             <div className="mb-8">
               <div className="flex justify-between items-center mb-3">
-                <h3 className="text-lg font-bold text-slate-700">Reporte General</h3>
-                <button onClick={() => exportToExcel('general')} className="px-4 py-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold text-xs flex items-center">Descargar Excel</button>
+                <h3 className="text-lg font-bold text-slate-700">Reporte General <span className="text-sm font-medium text-slate-500 ml-2">({reportMonth})</span></h3>
+                <button onClick={() => exportToExcel('general')} className="px-4 py-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold text-xs flex items-center shadow-sm">
+                  <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                  Descargar Excel Nativo (.xlsx)
+                </button>
               </div>
               <div className="table-container overflow-x-auto border border-slate-200 rounded max-h-[500px]">
                 <table className="min-w-full divide-y divide-slate-200 text-xs whitespace-nowrap text-center">
                   <thead className="bg-slate-800 text-white font-bold sticky top-0">
                     <tr>
                       <th className="px-2 py-2 text-left">CLIENTE</th><th className="px-2 py-2 text-left">IDENTIFICACIÓN</th><th className="px-2 py-2 text-left">GRUPO/PLAN</th>
-                      <th className="px-2 py-2 text-right">MONTO</th><th className="px-2 py-2 text-center">ESTADO</th><th className="px-2 py-2 text-right">CUOTA MES</th>
+                      <th className="px-2 py-2 text-right">MONTO</th><th className="px-2 py-2 text-center">ESTADO</th><th className="px-2 py-2 text-center">ENTREGA</th><th className="px-2 py-2 text-right">CUOTA MES</th>
                       <th className="px-2 py-2 text-red-600 bg-red-100">VENCIDAS</th><th className="px-2 py-2 text-red-600 bg-red-100">VALOR VENCIDO</th>
                       <th className="px-2 py-2 text-emerald-600 bg-emerald-100">COBRADAS (MES)</th>
                       <th className="px-2 py-2 text-emerald-600 bg-emerald-100">RECAUDO (MES)</th><th className="px-2 py-2 text-amber-600 bg-amber-100">PENDIENTES</th>
@@ -1733,6 +1919,11 @@ export default function App() {
                           <td className="px-2 py-2 font-medium text-left">{c.nombres}</td><td className="px-2 py-2 text-left">{c.docIdentidad}</td>
                           <td className="px-2 py-2 text-left font-bold text-slate-700">{c.grupoCodigo}-{c.puesto}</td><td className="px-2 py-2 font-medium text-right">${c.montoContratado.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                           <td className="px-2 py-2 text-center"><span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-bold text-[10px]">{c.estadoPlan}</span></td>
+                          <td className="px-2 py-2 text-center">
+                            <span className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${c.fechaEntrega ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-500 border border-slate-200'}`}>
+                              {c.fechaEntrega ? 'CON BIEN' : 'SIN BIEN'}
+                            </span>
+                          </td>
                           <td className="px-2 py-2 font-medium text-right">${c.valorCuota.toLocaleString('es-EC', { minimumFractionDigits: 2 })}</td>
                           <td className="px-2 py-2 font-bold text-red-600 bg-red-50">{metrics.vencidasMeta}</td><td className="px-2 py-2 font-bold text-red-600 bg-red-50 text-right">${metrics.valVencidoMeta.toFixed(2)}</td>
                           <td className="px-2 py-2 font-bold text-emerald-600 bg-emerald-50 border-l border-slate-100">{metrics.cobradasMes}</td>
@@ -1748,8 +1939,11 @@ export default function App() {
 
             <div>
               <div className="flex justify-between items-center mb-3">
-                <h3 className="text-lg font-bold text-slate-700">Recaudación por Ejecutivo</h3>
-                <button onClick={() => exportToExcel('ejecutivos')} className="px-4 py-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold text-xs">Descargar Excel</button>
+                <h3 className="text-lg font-bold text-slate-700">Recaudación por Ejecutivo <span className="text-sm font-medium text-slate-500 ml-2">({reportMonth})</span></h3>
+                <button onClick={() => exportToExcel('ejecutivos')} className="px-4 py-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold text-xs flex items-center shadow-sm">
+                  <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                  Descargar Excel Nativo (.xlsx)
+                </button>
               </div>
               <div className="table-container overflow-x-auto border border-slate-200 rounded max-w-4xl">
                 <table className="min-w-full divide-y divide-slate-200 text-sm whitespace-nowrap">
