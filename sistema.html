@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Aportes Mensuales</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <script src="https://npmcdn.com/flatpickr/dist/l10n/es.js"></script>
+    
+    <style>
+        @media print {
+            body { background-color: white !important; -webkit-print-color-adjust: exact; }
+            .no-print { display: none !important; }
+            .shadow-lg, .border-slate-100 { box-shadow: none !important; border: none !important; }
+            main { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
+        }
+        .tab-content { display: none; opacity: 0; transition: opacity 0.3s; }
+        .tab-content.active { display: block; opacity: 1; }
+        .table-container::-webkit-scrollbar { width: 8px; height: 8px; }
+        .table-container::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
+
+    <header class="bg-blue-900 text-white shadow-md no-print">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex justify-between h-16 items-center">
+            <h1 class="text-xl font-bold flex items-center gap-2">
+                <svg class="h-6 w-6 text-blue-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Sistema de Aportes Mensuales
+            </h1>
+        </div>
+    </header>
+
+    <main class="flex-grow max-w-7xl w-full mx-auto px-4 py-8">
+        <nav class="flex space-x-4 border-b border-gray-200 mb-6 overflow-x-auto no-print" aria-label="Tabs">
+            <button onclick="switchTab('base')" class="tab-btn py-3 px-1 border-b-2 font-medium text-sm border-blue-600 text-blue-700">0. Base (Importar)</button>
+            <button onclick="switchTab('dashboard')" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-500 hover:text-gray-700">1. Bandeja</button>
+            <button onclick="switchTab('client-info')" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-500 hover:text-gray-700">2. Cliente</button>
+            <button onclick="switchTab('payment-table')" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-500 hover:text-gray-700">3. Estado de Cuenta</button>
+            <button onclick="switchTab('mora-cobranzas')" id="tab-btn-mora" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hidden">4. Mora</button>
+            <button onclick="openReportesTab()" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-500 hover:text-gray-700">5. Reportes</button>
+        </nav>
+
+        <!-- TAB 0: BASE -->
+        <div id="tab-base" class="tab-content active bg-white shadow-lg rounded-xl p-6 border border-slate-100 no-print">
+            <h2 class="text-2xl font-semibold mb-4">Carga de Base de Datos</h2>
+            <div class="flex gap-4 mb-6">
+                <input type="file" id="excel-file" accept=".xlsx, .xls" class="block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-blue-50 file:text-blue-700" onchange="handleExcelUpload(event)">
+                <button onclick="clearDatabase()" class="px-4 py-2 bg-red-100 text-red-700 rounded-md text-sm font-bold whitespace-nowrap">Borrar Base</button>
+            </div>
+            <div id="excel-preview-container" class="hidden">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="font-bold">Vista Previa <span id="excel-count" class="text-slate-500 font-normal"></span></h3>
+                    <button onclick="processExcelImport()" class="px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-bold">Importar Datos</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 1: BANDEJA -->
+        <div id="tab-dashboard" class="tab-content bg-white shadow-lg rounded-xl p-6 border border-slate-100 no-print">
+            <h2 class="text-2xl font-semibold mb-6">Bandeja de Gestión</h2>
+            <input type="text" id="searchInput" onkeyup="renderDashboard()" placeholder="Buscar cliente..." class="w-full md:w-1/3 p-2 border rounded-md mb-4">
+            <div class="table-container border rounded-lg overflow-x-auto">
+                <table class="min-w-full text-sm divide-y">
+                    <thead class="bg-slate-50"><tr><th class="p-3 text-left">Cliente</th><th class="p-3 text-left">Doc</th><th class="p-3 text-left">Plan</th><th class="p-3 text-left">Ejecutivo</th><th class="p-3">Acciones</th></tr></thead>
+                    <tbody id="dashboard-tbody" class="divide-y"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TAB 4: MORA -->
+        <div id="tab-mora-cobranzas" class="tab-content bg-white shadow-lg rounded-xl p-6 border border-slate-100">
+            <div class="flex justify-between items-center mb-6 no-print">
+                <h2 class="text-2xl font-semibold">Mora y Cobranzas</h2>
+                <div class="flex gap-2">
+                    <input type="text" id="fecha-calculo-mora" class="datepicker border p-2 rounded-md font-bold text-blue-900" onchange="calculateAndRenderMora()">
+                    <button onclick="window.print()" class="bg-emerald-600 text-white px-4 py-2 rounded-md font-bold">Imprimir</button>
+                </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="bg-slate-50 p-4 border rounded-lg col-span-1 no-print">
+                    <h3 class="font-bold border-b pb-2 mb-2 text-sm">Parámetros (Ecuador)</h3>
+                    <p class="text-xs mb-2">Tasa Anual Aplicada: <span id="mora-tasa-anual" class="font-bold text-blue-600">-</span></p>
+                    <table class="w-full text-xs text-center">
+                        <thead class="bg-slate-200"><tr><th>Días</th><th>Tasa Mora %</th><th>T. Diaria %</th></tr></thead>
+                        <tbody id="mora-params-body"></tbody>
+                    </table>
+                </div>
+                <div class="col-span-2">
+                    <div class="flex gap-4 mb-4 font-bold text-lg"><span id="mora-client-name" class="text-slate-700"></span></div>
+                    <div class="table-container border rounded-lg">
+                        <table class="min-w-full text-xs divide-y text-center">
+                            <thead class="bg-slate-800 text-white uppercase"><tr><th class="p-2">Cuota</th><th class="p-2">Vence</th><th class="p-2">Días</th><th class="p-2 text-right">Saldo</th><th class="p-2 text-right text-amber-300">Mora</th><th class="p-2 text-right text-blue-300">Total</th></tr></thead>
+                            <tbody id="mora-results-body" class="divide-y"></tbody>
+                        </table>
+                    </div>
+                    <div class="mt-4 p-4 bg-slate-50 border rounded-lg text-right">
+                        <p class="text-sm">Subtotal Deuda: <span id="sum-mora-cuotas" class="font-bold"></span></p>
+                        <p class="text-sm text-amber-600">Subtotal Mora: <span id="sum-mora-recargos" class="font-bold"></span></p>
+                        <p class="text-xl font-black text-blue-800 mt-2 border-t pt-2">TOTAL A PAGAR: <span id="sum-mora-total"></span></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 5: REPORTES -->
+        <div id="tab-reportes" class="tab-content bg-white shadow-lg rounded-xl p-6 border border-slate-100 no-print">
+            <h2 class="text-2xl font-semibold mb-6">Reportes por Ejecutivo</h2>
+            <select id="filter-ejecutivo" onchange="generateReports()" class="p-2 border rounded-md mb-4 bg-slate-50 font-bold text-blue-900"></select>
+            <div class="table-container border rounded-lg">
+                <table class="min-w-full text-sm divide-y">
+                    <thead class="bg-slate-900 text-white uppercase text-xs">
+                        <tr><th class="p-3 text-left">Ejecutivo</th><th class="p-3 text-center">Clientes</th><th class="p-3 text-right">Valor Asignado</th><th class="p-3 text-right text-red-300">Total Vencido</th><th class="p-3 text-right text-emerald-300">Recaudo</th><th class="p-3 text-right text-amber-300">Pendiente</th></tr>
+                    </thead>
+                    <tbody id="report-ejecutivos-body" class="divide-y"></tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2"></div>
+
+    <script>
+        const STORAGE_KEY = 'aportes_clientes_db';
+        let parsedExcelData = [];
+        let currentMoraClientId = null;
+        
+        // Tabla oficial de mora (Ecuador)
+        const moraParams = [
+            { min: 1, max: 15, val: 5.0 },
+            { min: 16, max: 30, val: 7.0 },
+            { min: 31, max: 60, val: 9.0 },
+            { min: 61, max: 9999, val: 10.0 }
+        ];
+
+        const formatCurrency = num => '$ ' + (parseFloat(num) || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const parseNum = val => {
+            if(!val) return 0;
+            if(typeof val === 'number') return val;
+            let p = parseFloat(val.toString().replace(/[^0-9.,-]/g, "").replace(/,/g, "."));
+            return isNaN(p) ? 0 : Math.abs(p);
+        };
+
+        function showToast(msg) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = 'px-4 py-3 bg-slate-800 text-white rounded-md shadow-lg font-medium transition-opacity duration-300';
+            toast.innerText = msg;
+            container.appendChild(toast);
+            setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3000);
+        }
+
+        function switchTab(id) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('border-blue-600', 'text-blue-700');
+                btn.classList.add('border-transparent', 'text-gray-500');
+            });
+            document.getElementById(`tab-${id}`).classList.add('active');
+            event?.currentTarget?.classList.add('border-blue-600', 'text-blue-700');
+            event?.currentTarget?.classList.remove('border-transparent', 'text-gray-500');
+        }
+
+        function getClients() {
+            let data = localStorage.getItem(STORAGE_KEY);
+            if (!data) return [];
+            try { return JSON.parse(LZString.decompressFromUTF16(data) || data); } catch(e) { return []; }
+        }
+
+        function handleExcelUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            showToast("Leyendo archivo...");
+            setTimeout(() => {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const workbook = XLSX.read(new Uint8Array(e.target.result), {type: 'array'});
+                    const rawArrays = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], {header: 1, raw: true, defval: ""});
+                    if (rawArrays.length < 2) return showToast("Archivo vacío");
+                    
+                    const headers = rawArrays[0];
+                    parsedExcelData = rawArrays.slice(1).map(arr => {
+                        let obj = {};
+                        headers.forEach((h, i) => obj[h ? h.toString().trim().toLowerCase() : `emp_${i}`] = arr[i]);
+                        return obj;
+                    });
+                    document.getElementById('excel-preview-container').classList.remove('hidden');
+                    document.getElementById('excel-count').innerText = `${parsedExcelData.length} registros listos`;
+                };
+                reader.readAsArrayBuffer(file);
+            }, 100);
+        }
+
+        async function processExcelImport() {
+            if (!parsedExcelData.length) return;
+            let clients = getClients();
+            let imported = 0;
+            showToast("Procesando, espera por favor...");
+
+            for (let i = 0; i < parsedExcelData.length; i++) {
+                if (i % 50 === 0 && i > 0) await new Promise(r => setTimeout(r, 10)); // Respiro Asíncrono
+                
+                const row = parsedExcelData[i];
+                const cedula = (row['cedula'] || row['identificacion'] || row['documento'] || '').toString().trim();
+                if (!cedula || clients.find(c => c.docIdentidad === cedula)) continue;
+
+                let vCuota = parseNum(row['cuota'] || row['valor cuota']);
+                let vPlazo = parseInt(parseNum(row['plazo'] || row['meses'])) || 72;
+                let cuotasVencidas = parseInt(parseNum(row['vencidas'] || row['cuotas vencidas'])) || 0;
+                let valorVencidoExcel = parseNum(row['vencidos'] || row['saldo vencido'] || row['valor vencido']);
+                let carteraAsignada = parseNum(row['asignada'] || row['cartera']); 
+
+                // Efecto Cascada (Abonos)
+                let abonoCascada = 0;
+                if (cuotasVencidas > 0 && vCuota > 0 && valorVencidoExcel > 0) {
+                    let teorico = vCuota * cuotasVencidas;
+                    if (teorico - valorVencidoExcel > 0.1) abonoCascada = teorico - valorVencidoExcel;
+                }
+
+                let grpStr = (row['grupo'] || row['codigo'] || '').toString().toUpperCase();
+                let tipoPlan = grpStr.includes('ADP') ? 'Adjudicación Planificada' : 'Compra Planificada';
+
+                let newClient = {
+                    id: Date.now().toString() + i,
+                    nombres: row['cliente'] || row['nombres'] || 'Sin Nombre',
+                    docIdentidad: cedula,
+                    ejecutivoCartera: row['ejecutivo'] || row['ejecutivo asignado'] || 'Sin Asignar',
+                    tipoPlan: tipoPlan,
+                    valorCuota: vCuota,
+                    plazoPlan: vPlazo,
+                    cuotasPagadas: parseInt(parseNum(row['cuotas pagadas'])) || 0,
+                    abonoCascada: abonoCascada,
+                    valorVencidoExcel: valorVencidoExcel, // Prioridad J
+                    carteraAsignadaExcel: carteraAsignada > 0 ? carteraAsignada : valorVencidoExcel, // Prioridad M
+                    fechaPrimerPago: `${new Date().getFullYear()}-01-01`
+                };
+                newClient.tableData = generarTablaPagos(newClient);
+                clients.push(newClient);
+                imported++;
+            }
+            localStorage.setItem(STORAGE_KEY, LZString.compressToUTF16(JSON.stringify(clients)));
+            parsedExcelData = [];
+            renderDashboard();
+            showToast(`Importados: ${imported} clientes.`);
+            switchTab('dashboard');
+        }
+
+        function generarTablaPagos(c) {
+            let table = [];
+            let cPagadas = parseInt(c.cuotasPagadas);
+            let abonoPendiente = c.abonoCascada || 0;
+            
+            for (let i = 1; i <= c.plazoPlan; i++) {
+                let isPagado = i <= cPagadas;
+                let abonoFila = isPagado ? c.valorCuota : 0;
+                let m = (i - 1) % 12 + 1;
+                let y = 2024 + Math.floor((i - 1) / 12);
+                let fechaV = `${y}-${String(m).padStart(2,'0')}-01`;
+
+                if (!isPagado && abonoPendiente > 0) {
+                    let aplicar = Math.min(abonoPendiente, c.valorCuota);
+                    abonoFila = aplicar;
+                    abonoPendiente -= aplicar;
+                }
+                table.push({ numero: i, vencimiento: fechaV, cuotaMensual: c.valorCuota, abono: abonoFila });
+            }
+            return table;
+        }
+
+        function renderDashboard() {
+            const tbody = document.getElementById('dashboard-tbody');
+            const search = (document.getElementById('searchInput')?.value || '').toLowerCase();
+            tbody.innerHTML = '';
+            
+            getClients().filter(c => c.nombres.toLowerCase().includes(search) || c.docIdentidad.includes(search)).forEach(c => {
+                tbody.innerHTML += `<tr class="hover:bg-slate-100"><td class="p-3">${c.nombres}</td><td class="p-3">${c.docIdentidad}</td><td class="p-3">${c.tipoPlan}</td><td class="p-3">${c.ejecutivoCartera}</td>
+                <td class="p-3"><button onclick="abrirMora('${c.id}')" class="bg-amber-100 text-amber-700 px-3 py-1 rounded font-bold">Mora</button></td></tr>`;
+            });
+        }
+
+        function clearDatabase() {
+            if(confirm("¿Borrar todos los datos?")) {
+                localStorage.removeItem(STORAGE_KEY);
+                renderDashboard();
+                showToast("Base borrada.");
+            }
+        }
+
+        function abrirMora(id) {
+            currentMoraClientId = id;
+            document.getElementById('tab-btn-mora').classList.remove('hidden');
+            switchTab('mora-cobranzas');
+            let today = new Date();
+            document.getElementById('fecha-calculo-mora').value = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+            calculateAndRenderMora();
+        }
+
+        function calculateAndRenderMora() {
+            if(!currentMoraClientId) return;
+            const c = getClients().find(x => x.id === currentMoraClientId);
+            if(!c) return;
+
+            document.getElementById('mora-client-name').innerText = c.nombres;
+            
+            // Regla Tasa Fija 10.10%
+            let tasaAnual = c.tipoPlan === 'Adjudicación Planificada' ? 10.10 : 8.5; // Simplificado
+            document.getElementById('mora-tasa-anual').innerText = tasaAnual.toFixed(2) + '%';
+            
+            document.getElementById('mora-params-body').innerHTML = moraParams.map(p => {
+                let recargoDiario = ((tasaAnual + (tasaAnual * p.val / 100)) / 360).toFixed(4); // 360 días
+                return `<tr><td class="p-1 border">${p.min}-${p.max}</td><td class="p-1 border text-red-600 font-bold">${p.val}%</td><td class="p-1 border text-blue-600">${recargoDiario}%</td></tr>`;
+            }).join('');
+
+            const tbody = document.getElementById('mora-results-body');
+            tbody.innerHTML = '';
+            let tMora = 0, tCuota = 0;
+            let fCalc = document.getElementById('fecha-calculo-mora').value;
+
+            c.tableData.forEach(r => {
+                let saldo = r.cuotaMensual - (r.abono || 0);
+                if (saldo > 0 && r.vencimiento < fCalc) {
+                    let dias = Math.ceil((new Date(fCalc) - new Date(r.vencimiento)) / 86400000);
+                    if (dias > 0) {
+                        tCuota += saldo;
+                        let pctRecargo = 0;
+                        moraParams.forEach(p => { if (dias >= p.min && dias <= p.max) pctRecargo = p.val; });
+                        let tasaDiaria = (tasaAnual + (tasaAnual * pctRecargo / 100)) / 360;
+                        let moraVal = saldo * (tasaDiaria / 100) * dias;
+                        tMora += moraVal;
+                        tbody.innerHTML += `<tr><td class="p-2 border">${r.numero}</td><td class="p-2 border">${r.vencimiento}</td><td class="p-2 border font-bold text-red-600">${dias}</td><td class="p-2 border text-right">${formatCurrency(saldo)}</td><td class="p-2 border text-right text-amber-600">${formatCurrency(moraVal)}</td><td class="p-2 border text-right font-bold text-blue-800">${formatCurrency(saldo + moraVal)}</td></tr>`;
+                    }
+                }
+            });
+
+            document.getElementById('sum-mora-cuotas').innerText = formatCurrency(tCuota);
+            document.getElementById('sum-mora-recargos').innerText = formatCurrency(tMora);
+            document.getElementById('sum-mora-total').innerText = formatCurrency(tCuota + tMora);
+        }
+
+        function openReportesTab() {
+            switchTab('reportes');
+            let sel = document.getElementById('filter-ejecutivo');
+            let execs = [...new Set(getClients().map(c => c.ejecutivoCartera))].sort();
+            sel.innerHTML = '<option value="Todos">Todos los Ejecutivos</option>' + execs.map(e => `<option value="${e}">${e}</option>`).join('');
+            generateReports();
+        }
+
+        function generateReports() {
+            let filtro = document.getElementById('filter-ejecutivo').value;
+            let stats = {};
+
+            getClients().forEach(c => {
+                let e = c.ejecutivoCartera;
+                if (filtro !== 'Todos' && e !== filtro) return;
+                
+                if(!stats[e]) stats[e] = { total: 0, asignado: 0, vencido: 0, recaudo: 0 };
+                stats[e].total++;
+                
+                // Prioridad absoluta a la columna J y M
+                let valVencido = c.valorVencidoExcel > 0 ? c.valorVencidoExcel : 0;
+                let valAsignado = c.carteraAsignadaExcel > 0 ? c.carteraAsignadaExcel : valVencido;
+                
+                stats[e].asignado += valAsignado;
+                stats[e].vencido += valVencido;
+                // Lógica de recaudo omitida para simplicidad en este chunk
+            });
+
+            document.getElementById('report-ejecutivos-body').innerHTML = Object.keys(stats).sort().map(e => {
+                let d = stats[e];
+                let saldoPendiente = Math.max(0, d.vencido - d.recaudo);
+                return `<tr><td class="p-3 font-bold">${e}</td><td class="p-3 text-center">${d.total}</td><td class="p-3 text-right font-bold text-blue-600">${formatCurrency(d.asignado)}</td><td class="p-3 text-right font-bold text-red-500">${formatCurrency(d.vencido)}</td><td class="p-3 text-right font-bold text-emerald-500">${formatCurrency(d.recaudo)}</td><td class="p-3 text-right font-bold text-amber-500">${formatCurrency(saldoPendiente)}</td></tr>`;
+            }).join('');
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            flatpickr(".datepicker", { dateFormat: "Y-m-d" });
+            renderDashboard();
+            switchTab('dashboard');
+        });
+    </script>
+</body>
+</html>
