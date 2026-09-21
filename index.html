@@ -19,12 +19,11 @@
     <!-- Firebase Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // User provided config (For external deployment):
-        /*
-        const externalFirebaseConfig = {
+        // Configuración proporcionada por el usuario para Firebase
+        const firebaseConfig = {
             apiKey: "AIzaSyCA7pcyRFxbLAMq371YOFrf0fcl_kIg2mg",
             authDomain: "sistemaaporteslive.firebaseapp.com",
             projectId: "sistemaaporteslive",
@@ -32,28 +31,8 @@
             messagingSenderId: "750492010977",
             appId: "1:750492010977:web:c00f6b868749fa890deaa0"
         };
-        */
 
-        // Using Canvas environment config to comply with strict rules
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-aportes-app';
-        let firebaseConfig;
-        try {
-            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { /* Fallback or User Config here if needed */ };
-        } catch (e) {
-            console.warn("Could not parse __firebase_config, falling back.");
-        }
-        
-        // If no Canvas config, try to use user's config
-        if (!firebaseConfig || !firebaseConfig.apiKey) {
-             firebaseConfig = {
-                apiKey: "AIzaSyCA7pcyRFxbLAMq371YOFrf0fcl_kIg2mg",
-                authDomain: "sistemaaporteslive.firebaseapp.com",
-                projectId: "sistemaaporteslive",
-                storageBucket: "sistemaaporteslive.firebasestorage.app",
-                messagingSenderId: "750492010977",
-                appId: "1:750492010977:web:c00f6b868749fa890deaa0"
-            };
-        }
+        const appId = 'sistemaaporteslive'; // ID fijo para tu proyecto
 
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
@@ -69,6 +48,7 @@
         window.deleteDoc = deleteDoc;
         window.collection = collection;
         window.getDocs = getDocs;
+        window.writeBatch = writeBatch;
 
         // In-memory state
         window.memClients = [];
@@ -78,12 +58,8 @@
 
         async function initFirebase() {
             try {
-                // Auth
-                if (typeof __initial_auth_token !== 'undefined') {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                // Autenticación anónima para conectarse a TU proyecto de Firebase
+                await signInAnonymously(auth);
                 
                 if (!auth.currentUser) return;
                 console.log("Firebase Auth Success. User ID:", auth.currentUser.uid);
@@ -96,7 +72,7 @@
                 window.dispatchEvent(new Event('firebase-ready'));
             } catch (error) {
                 console.error("Firebase Init Error:", error);
-                showToast("Error conectando a la base de datos en la nube.", "error");
+                showToast("Error de Firebase. Asegúrate de habilitar 'Autenticación Anónima' en tu consola de Firebase.", "error");
             }
         }
 
@@ -1281,9 +1257,11 @@
         function getClientsLegacy() {
             let data = localStorage.getItem(STORAGE_KEY);
             if (!data) return [];
+            // Compatibilidad hacia atrás: si no está comprimido
             if (data.startsWith('[') || data.startsWith('{')) {
                 try { return JSON.parse(data); } catch(e) {}
             }
+            // Intento de descompresión
             try {
                 let decomp = LZString.decompressFromUTF16(data);
                 if (decomp) return JSON.parse(decomp);
@@ -1300,17 +1278,18 @@
                 let json = JSON.stringify(clients);
                 localStorage.setItem(STORAGE_KEY, LZString.compressToUTF16(json)); 
             } catch(e) {
-                console.warn("Local storage full, relying on Firestore.");
+                if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22) {
+                   showToast("Almacenamiento local lleno. Apoyándose exclusivamente en Firebase.", "error");
+                }
             }
 
             // Sync with Firestore if active
             if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
                 try {
                     const clientsPath = `artifacts/${window.appId}/public/data/clients`;
+                    let batch = window.writeBatch(window.db);
+                    let opCount = 0;
                     
-                    // We need to figure out which clients were added/updated. 
-                    // For simplicity in this adaptation, we will overwrite documents that exist in the array.
-                    // (A more robust way would be tracking deletions, but we'll overwrite active ones).
                     for (const c of clients) {
                         const docRef = window.doc(window.db, clientsPath, c.id);
                         
@@ -1319,11 +1298,24 @@
                         if (cData.tableData) cData.tableData = JSON.stringify(cData.tableData);
                         if (cData.gestiones) cData.gestiones = JSON.stringify(cData.gestiones);
 
-                        await window.setDoc(docRef, cData);
+                        batch.set(docRef, cData);
+                        opCount++;
+                        
+                        // Firestore tiene un límite de 500 operaciones por lote. Ejecutamos cada 400.
+                        if (opCount >= 400) {
+                            await batch.commit();
+                            batch = window.writeBatch(window.db);
+                            opCount = 0;
+                        }
+                    }
+                    
+                    // Si quedaron registros sin enviar en el último lote
+                    if (opCount > 0) {
+                        await batch.commit();
                     }
                 } catch (error) {
                     console.error("Error saving to Firestore:", error);
-                    showToast("Error guardando en la nube. Cambios guardados localmente.", "error");
+                    showToast("Error guardando masivamente en la nube. Revisa consola.", "error");
                 }
             }
         }
@@ -1672,9 +1664,11 @@
         function processExcelImport() {
             if (parsedExcelData.length === 0) return;
             
-            showConfirm(`¿Importar ${parsedExcelData.length} registros? Los clientes existentes con la misma Cédula NO serán reemplazados.`, () => {
+            showConfirm(`¿Importar ${parsedExcelData.length} registros? Los clientes existentes con la misma Cédula NO serán reemplazados.`, async () => {
                 let clients = getClients();
                 let imported = 0;
+                
+                showToast("Procesando y guardando datos en la Nube. Por favor, espera unos segundos...", "success");
  
                 const normalizeKey = (str) => {
                     if (typeof str !== 'string') return '';
@@ -1742,7 +1736,7 @@
                 parsedExcelData.forEach(row => {
                     const rawArr = row._rawArray || [];
                     
-                    const cedulaVal = getVal(row, ['cedula', 'cédula', 'identificacion', 'documento']);
+                    const cedulaVal = getVal(row, ['cedula', 'cédula', 'identificacion', 'documento', 'c.i', 'ci', 'dni', 'ruc']);
                     if (cedulaVal === undefined || cedulaVal === null) return;
                     const cedula = cedulaVal.toString().trim();
                     if (!cedula) return;
@@ -1890,9 +1884,9 @@
                     imported++;
                 });
  
-                saveClients(clients);
+                await saveClients(clients);
                 renderDashboard();
-                showToast(`Se importaron exitosamente ${imported} clientes nuevos.`);
+                showToast(`Se importaron exitosamente ${imported} clientes nuevos y se respaldaron en Firebase.`);
                 switchTab('dashboard');
             });
         }
