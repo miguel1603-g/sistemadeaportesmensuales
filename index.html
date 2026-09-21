@@ -4,16 +4,161 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sistema de Aportes Mensuales</title>
-    <!-- Tailwind CSS para los estilos -->
+    
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- SheetJS para leer y exportar archivos Excel localmente -->
+    <!-- SheetJS -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <!-- LZ-String para compresión de datos y evitar QuotaExceededError -->
+    <!-- LZ-String -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>
-    <!-- Flatpickr para forzar el formato de fechas DD/MM/AAAA en todos los navegadores -->
+    <!-- Flatpickr -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script src="https://npmcdn.com/flatpickr/dist/l10n/es.js"></script>
+
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // User provided config (For external deployment):
+        /*
+        const externalFirebaseConfig = {
+            apiKey: "AIzaSyCA7pcyRFxbLAMq371YOFrf0fcl_kIg2mg",
+            authDomain: "sistemaaporteslive.firebaseapp.com",
+            projectId: "sistemaaporteslive",
+            storageBucket: "sistemaaporteslive.firebasestorage.app",
+            messagingSenderId: "750492010977",
+            appId: "1:750492010977:web:c00f6b868749fa890deaa0"
+        };
+        */
+
+        // Using Canvas environment config to comply with strict rules
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-aportes-app';
+        let firebaseConfig;
+        try {
+            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { /* Fallback or User Config here if needed */ };
+        } catch (e) {
+            console.warn("Could not parse __firebase_config, falling back.");
+        }
+        
+        // If no Canvas config, try to use user's config
+        if (!firebaseConfig || !firebaseConfig.apiKey) {
+             firebaseConfig = {
+                apiKey: "AIzaSyCA7pcyRFxbLAMq371YOFrf0fcl_kIg2mg",
+                authDomain: "sistemaaporteslive.firebaseapp.com",
+                projectId: "sistemaaporteslive",
+                storageBucket: "sistemaaporteslive.firebasestorage.app",
+                messagingSenderId: "750492010977",
+                appId: "1:750492010977:web:c00f6b868749fa890deaa0"
+            };
+        }
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // Expose Firebase tools to global scope for the existing scripts to use
+        window.db = db;
+        window.auth = auth;
+        window.appId = appId;
+        window.doc = doc;
+        window.setDoc = setDoc;
+        window.getDoc = getDoc;
+        window.deleteDoc = deleteDoc;
+        window.collection = collection;
+        window.getDocs = getDocs;
+
+        // In-memory state
+        window.memClients = [];
+        window.memHistoricalBases = {};
+        window.memCortes = [];
+        window.firebaseInitialized = false;
+
+        async function initFirebase() {
+            try {
+                // Auth
+                if (typeof __initial_auth_token !== 'undefined') {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                if (!auth.currentUser) return;
+                console.log("Firebase Auth Success. User ID:", auth.currentUser.uid);
+
+                // Initial Load Data
+                await loadAllDataFromFirestore();
+                window.firebaseInitialized = true;
+                
+                // Trigger initial render
+                window.dispatchEvent(new Event('firebase-ready'));
+            } catch (error) {
+                console.error("Firebase Init Error:", error);
+                showToast("Error conectando a la base de datos en la nube.", "error");
+            }
+        }
+
+        async function loadAllDataFromFirestore() {
+            if (!auth.currentUser) return;
+            
+            // Paths according to RULE 1
+            const clientsPath = `artifacts/${window.appId}/public/data/clients`;
+            const basesPath = `artifacts/${window.appId}/public/data/historical_bases`;
+            const cortesPath = `artifacts/${window.appId}/public/data/cortes_cartera`;
+
+            try {
+                // Load Clients
+                const clientsSnapshot = await getDocs(collection(window.db, clientsPath));
+                window.memClients = [];
+                clientsSnapshot.forEach(docSnap => {
+                    const data = docSnap.data();
+                    // Handle potential stringified tableData (to stay within document size limits)
+                    if (typeof data.tableData === 'string') {
+                        try { data.tableData = JSON.parse(data.tableData); } catch(e) {}
+                    }
+                    if (typeof data.gestiones === 'string') {
+                        try { data.gestiones = JSON.parse(data.gestiones); } catch(e) {}
+                    }
+                    window.memClients.push(data);
+                });
+
+                // Load Historical Bases
+                const basesSnapshot = await getDocs(collection(window.db, basesPath));
+                window.memHistoricalBases = {};
+                basesSnapshot.forEach(docSnap => {
+                    const data = docSnap.data();
+                    if (data.dataString) {
+                         try {
+                             // Attempt to decompress if it was saved compressed
+                             let decomp = typeof LZString !== 'undefined' ? LZString.decompressFromUTF16(data.dataString) : null;
+                             window.memHistoricalBases[docSnap.id] = decomp ? JSON.parse(decomp) : JSON.parse(data.dataString);
+                         } catch(e) {
+                             console.error("Error parsing historical base", docSnap.id);
+                         }
+                    }
+                });
+
+                // Load Cortes
+                const cortesSnapshot = await getDocs(collection(window.db, cortesPath));
+                window.memCortes = [];
+                cortesSnapshot.forEach(docSnap => {
+                    window.memCortes.push(docSnap.data());
+                });
+
+                console.log(`Loaded ${window.memClients.length} clients from Firestore.`);
+            } catch (error) {
+                console.error("Error loading initial data:", error);
+                // Fallback to local storage if Firestore fails
+                window.memClients = getClientsLegacy();
+                window.memHistoricalBases = getBasesHistoricasLegacy();
+                window.memCortes = getCortesLegacy();
+            }
+        }
+
+        initFirebase();
+    </script>
     
     <!-- PWA Manifest Injection (Dynamic) -->
     <script>
@@ -34,7 +179,7 @@
                 }
             ]
         };
-
+ 
         const manifestBlob = new Blob([JSON.stringify(manifestData)], { type: 'application/manifest+json' });
         const manifestURL = URL.createObjectURL(manifestBlob);
         
@@ -43,7 +188,7 @@
         link.href = manifestURL;
         document.head.appendChild(link);
     </script>
-
+ 
     <style>
         /* Estilos de impresión */
         @media print {
@@ -64,7 +209,7 @@
         /* Animaciones para las pestañas */
         .tab-content { display: none; opacity: 0; transition: opacity 0.3s ease-in-out; }
         .tab-content.active { display: block; opacity: 1; }
-
+ 
         /* Estilo de Scrollbars */
         .table-container::-webkit-scrollbar { width: 8px; height: 8px; }
         .table-container::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
@@ -73,7 +218,7 @@
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
-
+ 
     <header class="bg-blue-900 text-white shadow-md no-print">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between h-16 items-center">
@@ -86,7 +231,7 @@
             </div>
         </div>
     </header>
-
+ 
     <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
         <div class="mb-6 border-b border-gray-200 no-print">
@@ -114,7 +259,7 @@
                 </button>
             </nav>
         </div>
-
+ 
         <div id="tab-base" class="tab-content active bg-white shadow-lg rounded-xl border border-slate-100 p-6 no-print">
             <div class="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div>
@@ -129,7 +274,7 @@
                     </button>
                 </div>
             </div>
-
+ 
             <div id="excel-preview-container" class="hidden">
                 <div class="flex justify-between items-center mb-3">
                     <h3 class="text-lg font-medium text-slate-700">Vista Previa de Datos <span id="excel-count" class="text-sm font-normal text-slate-500 ml-2"></span></h3>
@@ -155,7 +300,7 @@
                 <h3 class="mt-2 text-sm font-medium text-slate-900">Ningún archivo cargado</h3>
                 <p class="mt-1 text-xs text-slate-500">Sube un archivo Excel (.xlsx) para previsualizar e importar la data.</p>
             </div>
-
+ 
             <!-- Gestión de Bases Históricas -->
             <div class="mt-8 pt-6 border-t border-slate-200">
                 <h3 class="text-xl font-semibold text-slate-800 mb-4">Gestión de Bases Históricas</h3>
@@ -185,7 +330,7 @@
                     </div>
                 </div>
             </div>
-
+ 
             <!-- Respaldo del Sistema (Backup y Restauración) -->
             <div class="mt-8 pt-6 border-t border-slate-200">
                 <h3 class="text-xl font-semibold text-slate-800 mb-2">Migración y Respaldo del Sistema</h3>
@@ -209,7 +354,7 @@
                 </div>
             </div>
         </div>
-
+ 
         <div id="tab-dashboard" class="tab-content bg-white shadow-lg rounded-xl border border-slate-100 p-6 no-print">
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-2xl font-semibold text-slate-800">Bandeja de Gestión de Clientes</h2>
@@ -226,12 +371,12 @@
                 </h3>
                 <div id="ai-dashboard-content" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">Generando análisis...</div>
             </div>
-
+ 
             <div class="mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <input type="text" id="searchInput" onkeyup="filterDashboard()" placeholder="Buscar por nombre o documento..." class="w-full md:w-1/3 rounded-md border-slate-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border">
                 <button type="button" onclick="analizarCarteraIA()" class="w-full sm:w-auto px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors shadow-sm text-sm font-medium sm:hidden">✨ Analizar Cartera (IA)</button>
             </div>
-
+ 
             <div class="table-container overflow-x-auto border border-slate-200 rounded-lg">
                 <table class="min-w-full divide-y divide-slate-200 text-sm">
                     <thead class="bg-slate-50 text-slate-700">
@@ -252,7 +397,7 @@
                 </div>
             </div>
         </div>
-
+ 
         <div id="tab-client-info" class="tab-content bg-white shadow-lg rounded-xl border border-slate-100 p-6 no-print">
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-2xl font-semibold text-slate-800">Datos del Plan y Cliente</h2>
@@ -263,7 +408,7 @@
                     <button type="button" onclick="saveData(true)" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors shadow-sm text-sm font-medium">Guardar y Ver Tabla</button>
                 </div>
             </div>
-
+ 
             <form id="client-form" class="space-y-8">
                 <!-- Identificación -->
                 <div class="bg-slate-50 p-5 rounded-lg border border-slate-200">
@@ -283,7 +428,7 @@
                         </div>
                     </div>
                 </div>
-
+ 
                 <!-- Detalles del Plan -->
                 <div class="bg-slate-50 p-5 rounded-lg border border-slate-200">
                     <h3 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-200 pb-2">Detalles del Plan</h3>
@@ -331,7 +476,7 @@
                         </div>
                     </div>
                 </div>
-
+ 
                 <div class="bg-slate-50 p-5 rounded-lg border border-slate-200">
                     <h3 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-200 pb-2">Valores y Financiamiento</h3>
                     
@@ -362,7 +507,7 @@
                             </div>
                         </div>
                     </div>
-
+ 
                     <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
                         <div id="col-porcentaje" class="opacity-40 transition-opacity">
                             <label for="porcentajeEntrada" class="block text-sm font-medium text-slate-700 mb-1">1.9 % de Entrada</label>
@@ -387,7 +532,7 @@
                             <div class="text-xl font-black text-blue-900 mt-1" id="display-total-plan">$0.00</div>
                         </div>
                     </div>
-
+ 
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-slate-200">
                         <div>
                             <label for="cuotasPagadas" class="block text-sm font-medium text-slate-700 mb-1">1.12 # Cuotas Pagadas</label>
@@ -408,7 +553,7 @@
                 </div>
             </form>
         </div>
-
+ 
         <!-- 3. ESTADO DE CUENTA -->
         <div id="tab-payment-table" class="tab-content bg-white shadow-lg rounded-xl border border-slate-100 p-0 sm:p-6 print:shadow-none print:border-none print:p-0">
             
@@ -426,7 +571,7 @@
                     </button>
                 </div>
             </div>
-
+ 
             <div id="statement-view" class="hidden p-4 sm:p-0">
                 <div class="flex flex-col md:flex-row justify-between items-center mb-8 border-b-2 border-slate-800 pb-4">
                     <div id="logo-container" class="mb-4 md:mb-0 hidden">
@@ -437,7 +582,7 @@
                         <p class="text-slate-500 font-medium">Reporte de Aportes Mensuales</p>
                     </div>
                 </div>
-
+ 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 text-sm">
                     <div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
                         <h4 class="font-bold text-slate-800 border-b border-slate-200 pb-2 mb-3">Datos del Cliente</h4>
@@ -460,7 +605,7 @@
                         </div>
                     </div>
                 </div>
-
+ 
                 <div class="grid grid-cols-2 md:grid-cols-5 gap-0 bg-blue-50 border border-blue-200 rounded-lg mb-8 overflow-hidden">
                     <div class="p-3 text-center border-r border-b md:border-b-0 border-blue-200">
                         <p class="text-[10px] font-bold text-blue-600 uppercase tracking-wider">Monto Base</p>
@@ -483,7 +628,7 @@
                         <p class="text-xl font-black" id="lbl-total-plan">-</p>
                     </div>
                 </div>
-
+ 
                 <!-- TOGGLE PAGOS MASIVOS -->
                 <div id="container-toggle-pagos-masivos" class="mb-4 hidden no-print">
                     <div class="flex items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm inline-flex">
@@ -491,7 +636,7 @@
                         <label for="chk-pagos-masivos" class="ml-2 block text-sm text-slate-700 font-bold cursor-pointer">Habilitar Ingreso de Pagos Masivos (Ofertas / Varias)</label>
                     </div>
                 </div>
-
+ 
                 <!-- SECCIÓN: APLICAR PAGOS MASIVOS -->
                 <div id="panel-pagos-masivos" class="bg-indigo-50 p-4 rounded-lg border border-indigo-200 mb-6 hidden no-print">
                     <h4 class="font-bold text-indigo-900 border-b border-indigo-200 pb-2 mb-3 flex items-center">
@@ -526,7 +671,7 @@
                         </div>
                     </div>
                 </div>
-
+ 
                 <div class="table-container overflow-x-auto border border-slate-200 rounded-lg">
                     <table class="min-w-full divide-y divide-slate-200 text-sm">
                         <thead class="bg-slate-800 text-white">
@@ -548,7 +693,7 @@
                         </tbody>
                     </table>
                 </div>
-
+ 
                 <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-8 break-inside-avoid">
                     <div class="bg-slate-50 p-6 rounded-lg border border-slate-200">
                         <h4 class="font-bold text-slate-800 border-b border-slate-200 pb-2 mb-4 text-lg">Resumen Final</h4>
@@ -589,7 +734,7 @@
                 </button>
             </div>
         </div>
-
+ 
         <!-- 4. MORA Y COBRANZAS -->
         <div id="tab-mora-cobranzas" class="tab-content bg-white shadow-lg rounded-xl border border-slate-100 p-0 sm:p-6 print:shadow-none print:border-none print:p-0">
             <div class="mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4 p-6 sm:p-0 border-b border-slate-200 pb-4 no-print">
@@ -605,7 +750,7 @@
                     </button>
                 </div>
             </div>
-
+ 
             <div class="p-4 sm:p-0">
                 <div class="flex flex-col md:flex-row justify-between items-center mb-8 border-b-2 border-slate-800 pb-4">
                     <div id="mora-logo-container" class="mb-4 md:mb-0 hidden">
@@ -616,7 +761,7 @@
                         <p class="text-slate-500 font-medium">Reporte de Atrasos y Recargos</p>
                     </div>
                 </div>
-
+ 
                 <div class="bg-slate-50 p-4 rounded-lg border border-slate-200 mb-6">
                     <h4 class="font-bold text-slate-800 border-b border-slate-200 pb-2 mb-3">Datos del Cliente y Plan</h4>
                     <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
@@ -642,7 +787,7 @@
                         <div class="bg-white p-2 rounded border border-slate-200 shadow-sm"><span class="block text-[10px] uppercase font-bold text-slate-500">Total Cuotas</span><span id="mora-frm-total-cuotas" class="font-semibold">-</span></div>
                     </div>
                 </div>
-
+ 
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                     <div class="lg:col-span-1 space-y-6 no-print">
                         <div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
@@ -652,7 +797,7 @@
                                 <div class="bg-white p-2 rounded border border-blue-200 shadow-sm bg-blue-50"><span class="block text-[10px] uppercase font-bold text-blue-700">Tasa Anual</span><span id="mora-frm-tasa-admin" class="font-bold text-blue-800">-</span></div>
                             </div>
                         </div>
-
+ 
                         <div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
                             <h4 class="font-bold text-slate-800 text-sm border-b border-slate-200 pb-2 mb-3 flex justify-between">
                                 Parámetros de MORA
@@ -661,12 +806,12 @@
                             <p class="text-[10px] text-slate-500 mb-2">Aplica en el día 6 de calendario posterior al vencimiento (Día 1 de atraso).</p>
                             <table class="w-full text-xs">
                                 <thead class="bg-slate-200 text-slate-600">
-                                    <tr><th class="p-1">Días Min</th><th class="p-1">Días Max</th><th class="p-1" title="Tasa Anual %">T. Anual %</th><th class="p-1" title="Tasa Diaria %">T. Diaria %</th><th class="p-1"></th></tr>
+                                   <tr><th class="p-1">Días Min</th><th class="p-1">Días Max</th><th class="p-1" title="Tasa Anual %">T. Anual %</th><th class="p-1" title="Tasa Diaria %">T. Diaria %</th><th class="p-1"></th></tr>
                                 </thead>
                                 <tbody id="mora-params-body"></tbody>
                             </table>
                         </div>
-
+ 
                         <div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
                             <h4 class="font-bold text-slate-800 text-sm border-b border-slate-200 pb-2 mb-3 flex justify-between">
                                 Parámetros de COBRANZAS
@@ -675,13 +820,13 @@
                             <p class="text-[10px] text-slate-500 mb-2">Aplica en el día 21 de calendario (16 días de atraso). Por Saldo Cuota.</p>
                             <table class="w-full text-xs">
                                 <thead class="bg-slate-200 text-slate-600">
-                                    <tr><th class="p-1">Saldo Min $</th><th class="p-1">Saldo Max $</th><th class="p-1">Valor $</th><th class="p-1"></th></tr>
+                                   <tr><th class="p-1">Saldo Min $</th><th class="p-1">Saldo Max $</th><th class="p-1">Valor $</th><th class="p-1"></th></tr>
                                 </thead>
                                 <tbody id="cobranza-params-body"></tbody>
                             </table>
                         </div>
                     </div>
-
+ 
                     <div class="lg:col-span-2">
                         <div class="table-container overflow-x-auto border border-slate-200 rounded-lg mb-6">
                             <table class="min-w-full divide-y divide-slate-200 text-sm">
@@ -701,7 +846,7 @@
                                 <tbody id="mora-results-body" class="bg-white divide-y divide-slate-200"></tbody>
                             </table>
                         </div>
-
+ 
                         <div class="bg-slate-50 p-6 rounded-lg border border-slate-200 break-inside-avoid">
                             <h4 class="font-bold text-slate-800 border-b border-slate-200 pb-2 mb-4 text-lg">Resumen a Pagar</h4>
                             <div class="flex justify-between py-2 border-b border-slate-200">
@@ -723,7 +868,7 @@
                         </div>
                         
                         <p class="text-right text-sm text-slate-500 mt-4">Generado el: <span id="mora-fecha-generacion" class="font-semibold text-slate-700"></span></p>
-
+ 
                         <!-- Panel de Asistente IA (WhatsApp/Email) -->
                         <div class="mt-8 bg-gradient-to-r from-indigo-50 to-purple-50 p-6 rounded-lg border border-indigo-200 no-print break-inside-avoid shadow-sm">
                             <h4 class="font-bold text-indigo-900 border-b border-indigo-200 pb-2 mb-4 text-lg flex items-center">
@@ -735,15 +880,15 @@
                                 <div class="md:col-span-2">
                                     <label class="block text-xs font-medium text-indigo-800 mb-1">Elegir Tono del Mensaje</label>
                                     <select id="ai-tone" class="w-full rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border bg-white">
-                                        <option value="Amable y Preventivo">Amable (Recordatorio Preventivo)</option>
-                                        <option value="Firme y Directo">Firme (Atraso Confirmado)</option>
-                                        <option value="Urgente y Severo">Urgente (Notificación de Posible Bloqueo/Acción)</option>
-                                    </select>
+                                       <option value="Amable y Preventivo">Amable (Recordatorio Preventivo)</option>
+                                       <option value="Firme y Directo">Firme (Atraso Confirmado)</option>
+                                       <option value="Urgente y Severo">Urgente (Notificación de Posible Bloqueo/Acción)</option>
+                                   </select>
                                 </div>
                                 <div class="md:col-span-1">
                                     <button type="button" onclick="generarMensajeCobranza()" id="btn-generar-ia" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors shadow-sm text-sm font-medium flex items-center justify-center">
                                         Generar Texto
-                                    </button>
+                                   </button>
                                 </div>
                             </div>
                             <div class="relative">
@@ -753,7 +898,7 @@
                                 </button>
                             </div>
                         </div>
-
+ 
                         <!-- Panel de Historial de Gestiones (No Imprimible) -->
                         <div class="mt-8 bg-slate-50 p-6 rounded-lg border border-slate-200 no-print break-inside-avoid">
                             <h4 class="font-bold text-slate-800 border-b border-slate-200 pb-2 mb-4 text-lg">Historial de Gestiones</h4>
@@ -762,19 +907,19 @@
                                 <div class="mt-2 flex justify-end">
                                     <button type="button" onclick="guardarGestion()" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors shadow-sm text-sm font-medium">
                                         + Guardar Gestión
-                                    </button>
+                                   </button>
                                 </div>
                             </div>
                             <div class="space-y-3 max-h-96 overflow-y-auto pr-2" id="historial-gestiones-list">
                                 <!-- Llenado por JS -->
                             </div>
                         </div>
-
+ 
                     </div>
                 </div>
             </div>
         </div>
-
+ 
         <!-- 5. REPORTES Y PRODUCTIVIDAD -->
         <div id="tab-reportes" class="tab-content bg-white shadow-lg rounded-xl border border-slate-100 p-6 no-print">
             <div class="flex justify-between items-center mb-6 border-b border-slate-200 pb-4">
@@ -838,7 +983,7 @@
                     </div>
                 </div>
             </div>
-
+ 
             <!-- Reporte General -->
             <div class="mb-8">
                 <div class="flex justify-between items-center mb-4">
@@ -872,7 +1017,7 @@
                     </table>
                 </div>
             </div>
-
+ 
             <!-- Reporte por Ejecutivo -->
             <div class="mb-8">
                 <div class="flex justify-between items-center mb-4">
@@ -897,7 +1042,7 @@
                     </table>
                 </div>
             </div>
-
+ 
             <!-- Historial de Cortes de Cartera -->
             <div class="mt-8 border-t border-slate-200 pt-6">
                 <div class="flex justify-between items-center mb-4">
@@ -925,7 +1070,7 @@
                 </div>
             </div>
         </div>
-
+ 
         <!-- 6. CARTERA POR EDADES -->
         <div id="tab-edades" class="tab-content bg-white shadow-lg rounded-xl border border-slate-100 p-6 no-print">
             <div class="flex justify-between items-center mb-6 border-b border-slate-200 pb-4">
@@ -935,7 +1080,7 @@
                     Descargar Excel
                 </button>
             </div>
-
+ 
             <!-- Filtros -->
             <div class="mb-8 bg-slate-50 p-5 rounded-lg border border-slate-200">
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
@@ -945,11 +1090,11 @@
                             <label class="inline-flex items-center cursor-pointer">
                                 <input type="radio" name="edades-tipo" value="Todos" class="form-radio text-blue-600 focus:ring-blue-500 h-4 w-4" checked onchange="renderCarteraEdades()">
                                 <span class="ml-2 text-sm text-slate-700 font-medium">TODOS</span>
-                            </label><br>
+                           </label><br>
                             <label class="inline-flex items-center cursor-pointer">
                                 <input type="radio" name="edades-tipo" value="No Adjudicado" class="form-radio text-blue-600 focus:ring-blue-500 h-4 w-4" onchange="renderCarteraEdades()">
                                 <span class="ml-2 text-sm text-slate-700 font-medium">NO ADJUDICADOS</span>
-                            </label><br>
+                           </label><br>
                             <label class="inline-flex items-center cursor-pointer">
                                 <input type="radio" name="edades-tipo" value="Adjudicado" class="form-radio text-blue-600 focus:ring-blue-500 h-4 w-4" onchange="renderCarteraEdades()">
                                 <span class="ml-2 text-sm text-slate-700 font-medium">ADJUDICADOS</span>
@@ -971,7 +1116,7 @@
                     </div>
                 </div>
             </div>
-
+ 
             <!-- Tabla: Cartera Asignada -->
             <div class="mb-10 overflow-x-auto">
                 <h3 class="text-center font-bold text-slate-800 mb-3 uppercase tracking-wider text-sm">Cartera Asignada por Edades</h3>
@@ -997,7 +1142,7 @@
                     </tfoot>
                 </table>
             </div>
-
+ 
             <!-- Tabla: Cartera Cobrada -->
             <div class="mb-4 overflow-x-auto">
                 <h3 class="text-center font-bold text-slate-800 mb-3 uppercase tracking-wider text-sm">Cartera Cobrada por Edades</h3>
@@ -1024,12 +1169,12 @@
                 </table>
             </div>
         </div>
-
+ 
     </main>
-
+ 
     <!-- UI Modal y Toast -->
     <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 no-print"></div>
-
+ 
     <div id="confirm-modal" class="fixed inset-0 bg-slate-900 bg-opacity-50 z-50 hidden flex items-center justify-center no-print backdrop-blur-sm transition-opacity">
         <div class="bg-white rounded-xl shadow-2xl p-6 max-w-sm w-full mx-4 transform transition-transform">
             <div class="flex items-center justify-center w-12 h-12 rounded-full bg-amber-100 mb-4 mx-auto">
@@ -1045,13 +1190,13 @@
             </div>
         </div>
     </div>
-
+ 
     <script>
         const formatCurrency = (num) => {
             const val = parseFloat(num) || 0;
             return '$ ' + val.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         };
-
+ 
         const formatDate = (dateStr) => {
             if (!dateStr || dateStr === '-') return ''; 
             let d, m, y;
@@ -1071,18 +1216,18 @@
             if (y && m && d) return `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
             return dateStr;
         };
-
+ 
         const STORAGE_KEY = 'aportes_clientes_db';
         let currentTableData = [];
         let currentMoraClientId = null;
         let parsedExcelData = [];
-
+ 
         // Variables para Reportes Excel
         let exportDataGeneral = [];
         let exportDataEjecutivos = [];
         let exportDataEdadesAsignada = [];
         let exportDataEdadesCobrada = [];
-
+ 
         let moraParams = [
             { min: 1, max: 15, val: 5.0 },
             { min: 16, max: 30, val: 7.0 },
@@ -1097,7 +1242,7 @@
             { min: 80, max: 99.99, val: 15 },
             { min: 100, max: 999999, val: 18 }
         ];
-
+ 
         function showToast(message, type = 'success') {
             const container = document.getElementById('toast-container');
             const toast = document.createElement('div');
@@ -1107,7 +1252,7 @@
             setTimeout(() => toast.classList.remove('translate-y-10', 'opacity-0'), 10);
             setTimeout(() => { toast.classList.add('opacity-0'); setTimeout(() => toast.remove(), 300); }, 3000);
         }
-
+ 
         function showConfirm(message, onConfirm) {
             const modal = document.getElementById('confirm-modal');
             const msgEl = document.getElementById('confirm-modal-message');
@@ -1125,52 +1270,89 @@
             newConfirmBtn.addEventListener('click', () => { modal.classList.add('hidden'); onConfirm(); });
             newCancelBtn.addEventListener('click', () => { modal.classList.add('hidden'); });
         }
-
+ 
+        // --- ADAPTED FIRESTORE DATA LAYER ---
         function getClients() { 
+            // Return from in-memory state which is synced with Firestore
+            if (window.firebaseInitialized) return window.memClients;
+            return getClientsLegacy();
+        }
+
+        function getClientsLegacy() {
             let data = localStorage.getItem(STORAGE_KEY);
             if (!data) return [];
-            // Compatibilidad hacia atrás: si no está comprimido
             if (data.startsWith('[') || data.startsWith('{')) {
                 try { return JSON.parse(data); } catch(e) {}
             }
-            // Intento de descompresión
             try {
                 let decomp = LZString.decompressFromUTF16(data);
                 if (decomp) return JSON.parse(decomp);
             } catch(e) { console.error("Error al descomprimir base principal", e); }
             return [];
         }
-
-        function saveClients(clients) { 
+ 
+        async function saveClients(clients) { 
+            // Update memory
+            window.memClients = clients;
+            
+            // Try Legacy Storage as fallback/local cache
             try {
                 let json = JSON.stringify(clients);
                 localStorage.setItem(STORAGE_KEY, LZString.compressToUTF16(json)); 
             } catch(e) {
-                if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22) {
-                    showToast("Almacenamiento lleno. Eliminando base histórica más antigua de emergencia...", "error");
-                    // Auto-cleanup attempt
-                    const bases = getBasesHistoricas();
-                    const keys = Object.keys(bases).sort();
-                    if (keys.length > 0) {
-                        delete bases[keys[0]];
-                        if (saveBasesHistoricas(bases)) {
-                            // Try saving again after freeing space
-                            try {
-                                localStorage.setItem(STORAGE_KEY, LZString.compressToUTF16(JSON.stringify(clients)));
-                                showToast("Espacio liberado y base actual guardada con éxito.", "success");
-                            } catch(e2) {
-                                showToast("Error crítico: Almacenamiento lleno. Elimine más bases históricas manualmente.", "error");
-                            }
-                        }
-                    } else {
-                        showToast("Error crítico: Almacenamiento lleno. Exporte un backup y borre la base.", "error");
+                console.warn("Local storage full, relying on Firestore.");
+            }
+
+            // Sync with Firestore if active
+            if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                try {
+                    const clientsPath = `artifacts/${window.appId}/public/data/clients`;
+                    
+                    // We need to figure out which clients were added/updated. 
+                    // For simplicity in this adaptation, we will overwrite documents that exist in the array.
+                    // (A more robust way would be tracking deletions, but we'll overwrite active ones).
+                    for (const c of clients) {
+                        const docRef = window.doc(window.db, clientsPath, c.id);
+                        
+                        // Deep clone and serialize nested arrays/large objects to avoid size limits/issues
+                        const cData = JSON.parse(JSON.stringify(c));
+                        if (cData.tableData) cData.tableData = JSON.stringify(cData.tableData);
+                        if (cData.gestiones) cData.gestiones = JSON.stringify(cData.gestiones);
+
+                        await window.setDoc(docRef, cData);
                     }
+                } catch (error) {
+                    console.error("Error saving to Firestore:", error);
+                    showToast("Error guardando en la nube. Cambios guardados localmente.", "error");
                 }
             }
         }
+
+        async function deleteClientFromFirestore(id) {
+             if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                 try {
+                    const clientsPath = `artifacts/${window.appId}/public/data/clients`;
+                    await window.deleteDoc(window.doc(window.db, clientsPath, id));
+                 } catch(e) {
+                     console.error("Error deleting from Firestore", e);
+                 }
+             }
+        }
         
         function clearDatabase() {
-            showConfirm('¿Estás seguro de que quieres BORRAR TODOS los clientes de la base de datos? Esto no se puede deshacer.', () => {
+            showConfirm('¿Estás seguro de que quieres BORRAR TODOS los clientes de la base de datos? Esto no se puede deshacer.', async () => {
+                
+                // Clear Firestore
+                if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                    try {
+                        const clientsPath = `artifacts/${window.appId}/public/data/clients`;
+                        for (const c of window.memClients) {
+                             await window.deleteDoc(window.doc(window.db, clientsPath, c.id));
+                        }
+                    } catch(e) { console.error(e); }
+                }
+
+                window.memClients = [];
                 localStorage.removeItem(STORAGE_KEY);
                 parsedExcelData = [];
                 const fileInput = document.getElementById('excel-file-input');
@@ -1186,9 +1368,14 @@
                 showToast("Base de datos eliminada.");
             });
         }
-
+ 
         // --- Lógica de Bases Históricas ---
         function getBasesHistoricas() {
+            if (window.firebaseInitialized) return window.memHistoricalBases;
+            return getBasesHistoricasLegacy();
+        }
+
+        function getBasesHistoricasLegacy() {
             let data = localStorage.getItem('aportes_historical_dbs');
             if (!data) return {};
             if (data.startsWith('{')) {
@@ -1200,22 +1387,45 @@
             } catch(e) {}
             return {};
         }
+ 
+        async function saveBasesHistoricas(bases) {
+            window.memHistoricalBases = bases;
 
-        function saveBasesHistoricas(bases) {
             try {
                 let json = JSON.stringify(bases);
                 localStorage.setItem('aportes_historical_dbs', LZString.compressToUTF16(json));
-                return true;
             } catch(e) {
-                if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22) {
-                    showToast("Error de Capacidad: Memoria llena. Elimine bases históricas antiguas e intente de nuevo.", "error");
-                } else {
-                    showToast("Error inesperado al guardar la base.", "error");
-                }
-                return false;
+                console.warn("Local storage full for historical bases.");
             }
+
+            if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                try {
+                    const basesPath = `artifacts/${window.appId}/public/data/historical_bases`;
+                    // Save each base as a document
+                    for (const [key, value] of Object.entries(bases)) {
+                         const docRef = window.doc(window.db, basesPath, key.replace(/\//g, '_')); // sanitize id
+                         // Compress large data before sending to Firestore if needed, or serialize
+                         const dataString = typeof LZString !== 'undefined' ? LZString.compressToUTF16(JSON.stringify(value)) : JSON.stringify(value);
+                         await window.setDoc(docRef, { name: key, dataString: dataString, timestamp: new Date().toISOString() });
+                    }
+                    return true;
+                } catch (error) {
+                    console.error("Error saving historical base to Firestore:", error);
+                    return false;
+                }
+            }
+            return true;
         }
 
+        async function deleteBaseFromFirestore(name) {
+             if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                 try {
+                    const basesPath = `artifacts/${window.appId}/public/data/historical_bases`;
+                    await window.deleteDoc(window.doc(window.db, basesPath, name.replace(/\//g, '_')));
+                 } catch(e) {}
+             }
+        }
+ 
         function renderSelectBasesHistoricas() {
             const select = document.getElementById('select-base-historica');
             if(!select) return;
@@ -1224,7 +1434,7 @@
             Object.keys(bases).sort().forEach(name => {
                 select.innerHTML += `<option value="${name}">${name}</option>`;
             });
-
+ 
             const nameInput = document.getElementById('nombre-base-guardar');
             if(nameInput && !nameInput.value) {
                 const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
@@ -1232,17 +1442,17 @@
                 nameInput.value = `Base de ${meses[today.getMonth()]} ${today.getFullYear()}`;
             }
         }
-
+ 
         function guardarBaseHistorica() {
             const nameInput = document.getElementById('nombre-base-guardar');
             const name = nameInput.value.trim();
             if(!name) return showToast("Por favor ingrese un nombre para la base.", "error");
-
+ 
             const currentClients = getClients();
             if(currentClients.length === 0) {
                 return showToast("No hay clientes en la base actual para guardar.", "error");
             }
-
+ 
             const bases = getBasesHistoricas();
             
             const doSave = () => {
@@ -1257,19 +1467,19 @@
                     else delete bases[name];
                 }
             };
-
+ 
             if(bases[name]) {
                 showConfirm(`Ya existe una base con el nombre "${name}". ¿Desea sobreescribirla?`, doSave);
             } else {
                 doSave();
             }
         }
-
+ 
         function cargarBaseHistorica() {
             const select = document.getElementById('select-base-historica');
             const name = select.value;
             if(!name) return showToast("Seleccione una base histórica para consultar.", "error");
-
+ 
             showConfirm(`¿Cargar la "${name}"? Esto reemplazará los datos actuales en todas las pantallas. Si tienes trabajo actual sin guardar como base, se perderá.`, () => {
                 const bases = getBasesHistoricas();
                 if(bases[name]) {
@@ -1286,23 +1496,24 @@
                 }
             });
         }
-
+ 
         function eliminarBaseHistorica() {
             const select = document.getElementById('select-base-historica');
             const name = select.value;
             if(!name) return showToast("Seleccione una base histórica para eliminar.", "error");
-
-            showConfirm(`¿Está seguro de eliminar permanentemente la base histórica "${name}"?`, () => {
+ 
+            showConfirm(`¿Está seguro de eliminar permanentemente la base histórica "${name}"?`, async () => {
                 const bases = getBasesHistoricas();
                 if(bases[name]) {
                     delete bases[name];
-                    saveBasesHistoricas(bases);
+                    await saveBasesHistoricas(bases);
+                    await deleteBaseFromFirestore(name);
                     renderSelectBasesHistoricas();
                     showToast(`Base "${name}" eliminada.`);
                 }
             });
         }
-
+ 
         // --- MANEJO DE FECHAS ESTRICTO DD/MM/AAAA ---
         function parseLatamExcelDate(dateVal) {
             if (dateVal === null || dateVal === undefined || dateVal.toString().trim() === '') return '';
@@ -1314,20 +1525,20 @@
                 const jsDate = new Date(excelEpoch.getTime() + numVal * 86400000);
                 return `${jsDate.getUTCFullYear()}-${String(jsDate.getUTCMonth()+1).padStart(2, '0')}-${String(jsDate.getUTCDate()).padStart(2, '0')}`;
             }
-
+ 
             // 2. Objeto Date de Javascript
             if (dateVal instanceof Date) {
                 if (isNaN(dateVal.getTime())) return '';
                 return `${dateVal.getUTCFullYear()}-${String(dateVal.getUTCMonth()+1).padStart(2, '0')}-${String(dateVal.getUTCDate()).padStart(2, '0')}`;
             }
-
+ 
             // 3. Cadena de texto
             let str = dateVal.toString().trim();
             str = str.split(' ')[0]; // Cortar la hora si viene adjunta
-
+ 
             // Si ya está en formato YYYY-MM-DD
             if (str.match(/^\d{4}-\d{2}-\d{2}$/)) return str;
-
+ 
             const separator = str.includes('/') ? '/' : (str.includes('-') ? '-' : null);
             if (separator) {
                 let parts = str.split(separator);
@@ -1372,14 +1583,14 @@
             if (!isNaN(fallbackDate.getTime())) {
                  return `${fallbackDate.getFullYear()}-${String(fallbackDate.getMonth()+1).padStart(2, '0')}-${String(fallbackDate.getDate()).padStart(2, '0')}`;
             }
-
+ 
             return '';
         }
-
+ 
         function handleExcelUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
-
+ 
             const reader = new FileReader();
             reader.onload = function(e) {
                 const data = new Uint8Array(e.target.result);
@@ -1420,7 +1631,7 @@
             };
             reader.readAsArrayBuffer(file);
         }
-
+ 
         function renderExcelPreview() {
             const container = document.getElementById('excel-preview-container');
             const emptyState = document.getElementById('excel-empty-state');
@@ -1430,7 +1641,7 @@
             container.classList.remove('hidden');
             emptyState.classList.add('hidden');
             document.getElementById('excel-count').innerText = `(${parsedExcelData.length} registros)`;
-
+ 
             const keys = Object.keys(parsedExcelData[0]).filter(k => k !== '_rawArray');
             
             thead.innerHTML = '<tr>' + keys.map(k => `<th class="px-4 py-2 font-semibold text-left">${k}</th>`).join('') + '</tr>';
@@ -1457,19 +1668,19 @@
                 tbody.innerHTML += `<tr><td colspan="${keys.length}" class="px-4 py-3 text-center text-slate-500 italic">... y ${parsedExcelData.length - 10} filas más.</td></tr>`;
             }
         }
-
+ 
         function processExcelImport() {
             if (parsedExcelData.length === 0) return;
             
             showConfirm(`¿Importar ${parsedExcelData.length} registros? Los clientes existentes con la misma Cédula NO serán reemplazados.`, () => {
                 let clients = getClients();
                 let imported = 0;
-
+ 
                 const normalizeKey = (str) => {
                     if (typeof str !== 'string') return '';
                     return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
                 };
-
+ 
                 const getVal = (row, keys) => {
                     const rowKeys = Object.keys(row);
                     for (let k of keys) {
@@ -1479,7 +1690,7 @@
                     }
                     return '';
                 };
-
+ 
                 // LECTOR INTELIGENTE DE MONEDAS: Interpreta correctamente "45.387,97" y "45,387.97"
                 const parseNum = (val) => {
                     if(typeof val === 'number') return val;
@@ -1525,7 +1736,7 @@
                     if (isNaN(p)) return 0;
                     return isNegative ? -Math.abs(p) : Math.abs(p);
                 };
-
+ 
                 const headers = Object.keys(parsedExcelData[0] || {});
                 
                 parsedExcelData.forEach(row => {
@@ -1535,10 +1746,10 @@
                     if (cedulaVal === undefined || cedulaVal === null) return;
                     const cedula = cedulaVal.toString().trim();
                     if (!cedula) return;
-
+ 
                     const exist = clients.find(c => c.docIdentidad === cedula);
                     if (exist) return; 
-
+ 
                     let fAdjVal = getVal(row, ['fecha adjudicacion', 'fecha adjudicación', 'fecha adj', 'fecha adj.', 'f. adjudicacion', 'f. adjudicación', 'fecha de adjudicacion', 'fecha de adjudicación']);
                     let fAdj = parseLatamExcelDate(fAdjVal);
                     
@@ -1554,7 +1765,7 @@
                         const today = new Date();
                         fInsc = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
                     }
-
+ 
                     let pAdj = getVal(row, ['adj. por', 'adjudicado por', 'forma adjudicacion', 'forma adjudicación']);
                     let ePlanStrRaw = getVal(row, ['estado del plan1', 'estado plan 1', 'estado plan1', 'estado del plan 1', 'estado plan', 'estado del plan', 'estado']) || '';
                     let ePlanClean = ePlanStrRaw.toString().toLowerCase().replace(/[^a-z0-9]/g, ''); 
@@ -1622,9 +1833,9 @@
                             else if (idStr.includes('ACV')) tipoPlanAsignado = 'Compra Planificada';
                         }
                     }
-
+ 
                     let ejecutivo = getVal(row, ['ejecutivo asignado', 'ejecutivo', 'ejecutivo cliente', 'cobrador']) || 'Sin Asignar';
-
+ 
                     let asigTotal = parseNum(rawArr[12]);
                     let asig1_30 = parseNum(rawArr[13]);
                     let asig31_60 = parseNum(rawArr[14]);
@@ -1632,9 +1843,9 @@
                     let asig91_120 = parseNum(rawArr[16]);
                     let asig121_150 = parseNum(rawArr[17]);
                     let asig151_mas = parseNum(rawArr[18]);
-
+ 
                     let fUltimoPago = parseLatamExcelDate(rawArr[30]); // Columna AE (Índice 30)
-
+ 
                     const newClient = {
                         id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
                         nombres: getVal(row, ['cliente', 'nombres', 'nombre']) || 'Sin Nombre',
@@ -1678,14 +1889,14 @@
                     clients.push(newClient);
                     imported++;
                 });
-
+ 
                 saveClients(clients);
                 renderDashboard();
                 showToast(`Se importaron exitosamente ${imported} clientes nuevos.`);
                 switchTab('dashboard');
             });
         }
-
+ 
         // --- Lógica Pestaña 1 Bandeja Gestión ---
         function renderDashboard() {
             const clients = getClients();
@@ -1718,7 +1929,7 @@
                 });
             }
         }
-
+ 
         function filterDashboard() {
             const input = document.getElementById('searchInput').value.toLowerCase();
             const rows = document.getElementById('dashboard-tbody').getElementsByTagName('tr');
@@ -1738,7 +1949,7 @@
                 }       
             }
         }
-
+ 
         // --- Lógica Pestaña 2 Formulario ---
         function clearForm() {
             document.getElementById('client-form').reset();
@@ -1753,13 +1964,13 @@
             setFpClear('fechaEntrega');
             setFpClear('fechaPagoEntrada');
             setFpClear('fechaPrimerPago');
-
+ 
             document.getElementById('estadoActivo').value = 'Activo';
             document.getElementById('ejecutivoCartera').value = '';
             handlePlanTypeChange();
             handleEstadoPlanChange();
         }
-
+ 
         function createNewClient() {
             clearForm();
             document.getElementById('clientId').value = '';
@@ -1767,14 +1978,14 @@
             document.getElementById('statement-view').classList.add('hidden');
             switchTab('client-info');
         }
-
+ 
         function handlePlanTypeChange() {
             const isAdjPlan = document.getElementById('tipoPlan').value === 'Adjudicación Planificada';
             document.getElementById('col-porcentaje').classList.toggle('opacity-40', !isAdjPlan);
             document.getElementById('col-valor-entrada').classList.toggle('opacity-40', !isAdjPlan);
             document.getElementById('col-fecha-pago-entrada').classList.toggle('opacity-40', !isAdjPlan);
             document.getElementById('porcentajeEntrada').disabled = !isAdjPlan;
-
+ 
             let fpEntrada = document.getElementById('fechaPagoEntrada')._flatpickr;
             if(fpEntrada) {
                 if(isAdjPlan) {
@@ -1785,7 +1996,7 @@
                     fpEntrada.element.style.pointerEvents = "none";
                 }
             }
-
+ 
             if (!isAdjPlan) {
                 document.getElementById('porcentajeEntrada').value = '';
                 if(fpEntrada) fpEntrada.clear();
@@ -1793,7 +2004,7 @@
             }
             calculateValues();
         }
-
+ 
         function handleEstadoPlanChange() {
             const isAdj = document.getElementById('estadoPlan').value === 'Adjudicado';
             document.getElementById('col-forma-adjudicacion').classList.toggle('hidden', !isAdj);
@@ -1808,7 +2019,7 @@
                 if(document.getElementById('fechaEntrega')._flatpickr) document.getElementById('fechaEntrega')._flatpickr.clear();
             }
         }
-
+ 
         function calculateValues() {
             const m = parseFloat(document.getElementById('montoContratado').value) || 0;
             const p = parseInt(document.getElementById('plazoPlan').value) || 0;
@@ -1822,16 +2033,16 @@
                 valEntrada = m * (por / 100);
                 document.getElementById('valorEntrada').value = valEntrada.toFixed(2);
             }
-
+ 
             const total = (v * p) + valEntrada;
             document.getElementById('display-total-plan').innerText = formatCurrency(total);
             document.getElementById('valorTotalPagado').value = (c * v).toFixed(2);
         }
-
+ 
         function editClient(id) {
             const c = getClients().find(x => x.id === id);
             if (!c) return;
-
+ 
             document.getElementById('clientId').value = c.id;
             document.getElementById('nombres').value = c.nombres;
             document.getElementById('docIdentidad').value = c.docIdentidad;
@@ -1864,33 +2075,34 @@
             
             document.getElementById('formaAdjudicacion').value = c.formaAdjudicacion || '';
             document.getElementById('numeroAsamblea').value = c.numeroAsamblea || '';
-
+ 
             if (c.tipoPlan === 'Adjudicación Planificada') {
                 document.getElementById('porcentajeEntrada').value = ((c.valorEntrada / c.montoContratado) * 100).toFixed(1);
             }
             calculateValues();
             switchTab('client-info');
         }
-
+ 
         function deleteClient(id) {
             showConfirm('¿Eliminar este cliente y todos sus pagos?', () => {
                 let clients = getClients().filter(c => c.id !== id);
                 saveClients(clients);
+                deleteClientFromFirestore(id);
                 renderDashboard();
                 if (document.getElementById('clientId').value === id) { createNewClient(); switchTab('dashboard'); }
                 showToast('Cliente eliminado.');
             });
         }
-
+ 
         function saveData(goToTable = true) {
             const form = document.getElementById('client-form');
             if (!form.checkValidity()) { form.reportValidity(); return; }
-
+ 
             const isNew = !document.getElementById('clientId').value;
             const cId = isNew ? Date.now().toString() : document.getElementById('clientId').value;
-
+ 
             const existingClient = getClients().find(c => c.id === cId);
-
+ 
             const data = {
                 id: cId,
                 nombres: document.getElementById('nombres').value,
@@ -1919,10 +2131,10 @@
                 edadesExcel: existingClient?.edadesExcel || null
             };
             data.totalPlan = (data.valorCuota * data.plazoPlan) + data.valorEntrada;
-
+ 
             let clients = getClients();
             let idx = clients.findIndex(c => c.id === cId);
-
+ 
             if (isNew || idx === -1) {
                 currentTableData = generateInitialTableData(data);
                 finalizeSave(data, clients, -1, goToTable, true);
@@ -1939,7 +2151,7 @@
                 }
             }
         }
-
+ 
         function finalizeSave(data, clients, idx, goToTable, isNew) {
             data.tableData = currentTableData;
             if (isNew) { clients.push(data); document.getElementById('clientId').value = data.id; } 
@@ -1949,7 +2161,7 @@
             renderDashboard();
             populateStatement(data);
             renderTable(data);
-
+ 
             document.getElementById('empty-state').classList.add('hidden');
             document.getElementById('statement-view').classList.remove('hidden');
             
@@ -1960,14 +2172,14 @@
                 showToast("Información y Estado de Cuenta actualizados exitosamente.");
             }
         }
-
+ 
         // --- Lógica Pestaña 3 Estado de Cuenta ---
         function imprimirEstadoCuenta() {
             const d = new Date();
             document.getElementById('fecha-generacion').innerText = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
             window.print();
         }
-
+ 
         function saveFromTable() {
             const id = document.getElementById('clientId').value;
             if (!id) return showToast('Error: Cliente no activo.', 'error');
@@ -1989,7 +2201,7 @@
                 showToast('Tabla guardada exitosamente.');
             }
         }
-
+ 
         function viewClient(id) {
             const c = getClients().find(x => x.id === id);
             if (!c) return;
@@ -2005,7 +2217,7 @@
             
             switchTab('payment-table');
         }
-
+ 
         // NUEVA FUNCIÓN: Motor matemático para calcular fechas hacia atrás y hacia adelante de forma exacta
         function getVencimiento(anchorDateStr, anchorIndex, targetIndex) {
             let parts = anchorDateStr.split('-');
@@ -2021,14 +2233,14 @@
             
             return `${newY}-${String(newM).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         }
-
+ 
         function generateInitialTableData(data) {
             let table = [];
             
             let anchorDate = data.fechaPrimerPago;
             let anchorIndex = 1;
             let manualPagadas = parseInt(data.cuotasPagadas) || 0;
-
+ 
             // Anclar la tabla a la última cuota pagada si existe
             if (manualPagadas > 0 && data.fechaUltimoPago && data.fechaUltimoPago !== '') {
                 anchorDate = data.fechaUltimoPago;
@@ -2036,12 +2248,12 @@
             } else if (!anchorDate) {
                 return table; // Si no hay fecha de inicio ni de último pago, no puede armar la tabla
             }
-
+ 
             let vCuota = parseFloat(data.valorCuota); 
             if (isNaN(vCuota) || vCuota < 0) vCuota = 0;
             
             let cCanceladas = 0;
-
+ 
             for (let i = 1; i <= data.plazoPlan; i++) {
                 // Proyecta la fecha exacta hacia atrás o hacia adelante
                 let vStr = getVencimiento(anchorDate, anchorIndex, i);
@@ -2053,14 +2265,14 @@
                 } else if (data.fechaUltimoPago && data.fechaUltimoPago !== '') {
                     isPagado = vStr <= data.fechaUltimoPago;
                 }
-
+ 
                 if (isPagado) cCanceladas++;
-
+ 
                 let fPago = "";
                 if (isPagado) {
                     fPago = vStr; // Las cuotas canceladas asumen su pago en la misma fecha proyectada
                 }
-
+ 
                 table.push({ numero: i, vencimiento: vStr, cuotaMensual: vCuota, abono: isPagado ? vCuota : 0, fechaPago: fPago, descMora: 0, descCobranza: 0 });
             }
             
@@ -2068,18 +2280,18 @@
             if (anchorIndex > 1) {
                 data.fechaPrimerPago = getVencimiento(anchorDate, anchorIndex, 1);
             }
-
+ 
             data.cuotasPagadas = cCanceladas;
             return table;
         }
-
+ 
         function syncTableData(data, oldData) {
             let table = [];
             
             let anchorDate = data.fechaPrimerPago;
             let anchorIndex = 1;
             let totalPagadas = parseInt(data.cuotasPagadas) || 0;
-
+ 
             // Anclar la tabla a la última cuota pagada si existe
             if (totalPagadas > 0 && data.fechaUltimoPago && data.fechaUltimoPago !== '') {
                 anchorDate = data.fechaUltimoPago;
@@ -2087,12 +2299,12 @@
             } else if (!anchorDate) {
                 return oldData;
             }
-
+ 
             let vCuota = parseFloat(data.valorCuota); 
             if (isNaN(vCuota) || vCuota < 0) vCuota = 0;
             
             let cCanceladas = 0;
-
+ 
             for (let i = 1; i <= data.plazoPlan; i++) {
                 let vStr = getVencimiento(anchorDate, anchorIndex, i);
                 
@@ -2104,7 +2316,7 @@
                 if (isPagada) {
                     fPagoAsignada = vStr;
                 }
-
+ 
                 if (ex) {
                     let nuevoAbono = isPagada ? vCuota : 0;
                     if (!isPagada) {
@@ -2113,7 +2325,7 @@
                             nuevoAbono = viejoAbono > vCuota ? vCuota : viejoAbono;
                         }
                     }
-
+ 
                     table.push({ 
                         numero: i, 
                         vencimiento: vStr, // Obliga el reordenamiento estricto de las fechas
@@ -2132,11 +2344,11 @@
             if (anchorIndex > 1) {
                 data.fechaPrimerPago = getVencimiento(anchorDate, anchorIndex, 1);
             }
-
+ 
             data.cuotasPagadas = cCanceladas;
             return table;
         }
-
+ 
         function populateStatement(data) {
             document.getElementById('lbl-nombre').innerText = data.nombres;
             document.getElementById('lbl-doc').innerText = data.docIdentidad;
@@ -2155,7 +2367,7 @@
                 document.querySelectorAll('.lbl-adjudicacion').forEach(el => el.classList.add('hidden'));
             }
             eEl.className = data.estadoPlan === 'Adjudicado' ? 'font-bold text-emerald-600' : 'font-bold text-amber-500';
-
+ 
             document.getElementById('lbl-monto').innerText = formatCurrency(data.montoContratado);
             document.getElementById('lbl-plazo').innerText = `${data.plazoPlan} Meses`;
             document.getElementById('lbl-cuota').innerText = formatCurrency(data.valorCuota);
@@ -2186,7 +2398,7 @@
                 toggleContainer.classList.add('hidden');
             }
         }
-
+ 
         function togglePagosMasivos() {
             const chk = document.getElementById('chk-pagos-masivos');
             const panel = document.getElementById('panel-pagos-masivos');
@@ -2196,7 +2408,7 @@
                 panel.classList.add('hidden');
             }
         }
-
+ 
         function calculateDaysLate(vencimiento, fechaPago) {
             if (!fechaPago) return "-";
             const vDate = new Date(vencimiento + 'T00:00:00');
@@ -2204,14 +2416,14 @@
             const diffDays = Math.ceil((pDate - vDate) / (1000 * 60 * 60 * 24));
             return diffDays > 0 ? diffDays : 0;
         }
-
+ 
         function renderTable(data) {
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '';
-
+ 
             let saldoPlan = data.totalPlan;
             let abonoEntrada = 0; let totalP = 0; let cCanceladas = 0; let cOfertadas = 0;
-
+ 
             if (data.tipoPlan === 'Adjudicación Planificada') {
                 let salIniE = saldoPlan;
                 abonoEntrada = data.fechaPagoEntrada ? data.valorEntrada : 0;
@@ -2235,10 +2447,10 @@
                     </tr>
                 `;
             }
-
+ 
             const today = new Date();
             const todayStr = today.getFullYear() + "-" + String(today.getMonth() + 1).padStart(2, '0') + "-" + String(today.getDate()).padStart(2, '0');
-
+ 
             for (let i = 0; i < currentTableData.length; i++) {
                 let row = currentTableData[i];
                 let saldoIni = saldoPlan;
@@ -2247,10 +2459,10 @@
                 let salCuota = cMensual - abono;
                 
                 saldoPlan -= abono; if (saldoPlan < 0) saldoPlan = 0;
-
+ 
                 let estCuota = ""; let bClass = ""; let onClickStr = "";
                 let isOverdue = salCuota > 0 && row.vencimiento < todayStr;
-
+ 
                 if (abono >= cMensual && cMensual > 0) {
                     estCuota = row.tipoPagoEspecial ? `Cancelada (${row.tipoPagoEspecial})` : "Cancelada"; 
                     bClass = row.tipoPagoEspecial ? "bg-indigo-100 text-indigo-800 border border-indigo-200" : "bg-blue-100 text-blue-800"; 
@@ -2264,10 +2476,10 @@
                     estCuota = abono > 0 ? "Parcial" : "Pendiente";
                     bClass = "bg-emerald-100 text-emerald-800";
                 }
-
+ 
                 totalP += abono;
                 let diasPago = calculateDaysLate(row.vencimiento, row.fechaPago);
-
+ 
                 tbody.innerHTML += `
                     <tr class="${i%2===0?'bg-slate-50':'bg-white'} hover:bg-blue-50">
                         <td class="px-2 py-2 text-center text-sm font-bold text-slate-700">${row.numero}</td>
@@ -2297,13 +2509,13 @@
                     </tr>
                 `;
             }
-
+ 
             document.getElementById('sum-cuotas-pagadas').innerText = cCanceladas;
             document.getElementById('sum-cuotas-ofertadas').innerText = cOfertadas;
             document.getElementById('sum-valor-pagado').innerText = formatCurrency(totalP + abonoEntrada);
             document.getElementById('sum-cuotas-pendientes').innerText = Math.max(0, data.plazoPlan - (cCanceladas + cOfertadas));
             document.getElementById('sum-valor-pendiente').innerText = formatCurrency(Math.max(0, data.totalPlan - (totalP + abonoEntrada)));
-
+ 
             // Activar Flatpickr optimizado para escritura manual directa
             const tableFpConfig = (field) => ({
                 dateFormat: "d/m/Y",
@@ -2319,11 +2531,11 @@
                     updateRowData(inst.element.dataset.row, field, ymd, inst.element.dataset.client);
                 }
             });
-
+ 
             flatpickr('.fp-vencimiento', tableFpConfig('vencimiento'));
             flatpickr('.fp-pago', tableFpConfig('fechaPago'));
         }
-
+ 
         // Lógica de Pagos Masivos
         function aplicarPagosMasivos() {
             const clientId = document.getElementById('clientId').value;
@@ -2331,12 +2543,12 @@
                 showToast('Primero debe guardar o seleccionar un cliente.', 'error');
                 return;
             }
-
+ 
             const tipo = document.getElementById('masivo-tipo').value;
             const desde = parseInt(document.getElementById('masivo-desde').value);
             const hasta = parseInt(document.getElementById('masivo-hasta').value);
             const fecha = document.getElementById('masivo-fecha').value;
-
+ 
             if (isNaN(desde) || isNaN(hasta) || desde > hasta || desde < 1) {
                 showToast('Rango de cuotas inválido.', 'error');
                 return;
@@ -2345,7 +2557,7 @@
                 showToast('Debe ingresar la fecha de pago.', 'error');
                 return;
             }
-
+ 
             let modificadas = 0;
             currentTableData.forEach((row, index) => {
                 if (row.numero >= desde && row.numero <= hasta) {
@@ -2355,7 +2567,7 @@
                     modificadas++;
                 }
             });
-
+ 
             if (modificadas > 0) {
                 let clients = getClients();
                 let cIdx = clients.findIndex(c => c.id === clientId);
@@ -2382,7 +2594,7 @@
                 showToast('Las cuotas seleccionadas exceden el plazo del plan.', 'error');
             }
         }
-
+ 
         function updateRowData(idx, field, value, clientId) {
             if (field === 'abono') {
                 let val = parseFloat(value);
@@ -2420,7 +2632,7 @@
                     }
                 }
             }
-
+ 
             let clients = getClients();
             let cIdx = clients.findIndex(c => c.id === clientId);
             if (cIdx > -1) {
@@ -2437,7 +2649,7 @@
                 renderTable(clients[cIdx]);
             }
         }
-
+ 
         // --- Lógica Pestaña 4 Mora ---
         function calcularTasaAnual(client) {
             if (!client || client.plazoPlan <= 0 || client.montoContratado <= 0) return 0;
@@ -2456,12 +2668,12 @@
                 return ((diferencia / monto) / anios) * 100;
             }
         }
-
+ 
         function openMoraTab(id) {
             currentMoraClientId = id;
             document.getElementById('tab-btn-mora-cobranzas').classList.remove('hidden');
             switchTab('mora-cobranzas');
-
+ 
             const dateInput = document.getElementById('fecha-calculo-mora');
             if (!dateInput.value) {
                 const today = new Date();
@@ -2472,7 +2684,7 @@
                     dateInput.value = todayStr;
                 }
             }
-
+ 
             renderMoraParamsUI();
             calculateAndRenderMora();
             
@@ -2482,7 +2694,7 @@
             const client = getClients().find(c => c.id === id);
             renderGestiones(client);
         }
-
+ 
         function guardarGestion() {
             if(!currentMoraClientId) return;
             const texto = document.getElementById('nueva-gestion-texto').value.trim();
@@ -2499,7 +2711,7 @@
                 renderGestiones(clients[cIdx]);
             }
         }
-
+ 
         function renderGestiones(client) {
             const list = document.getElementById('historial-gestiones-list');
             if(!list) return;
@@ -2524,7 +2736,7 @@
                 `;
             });
         }
-
+ 
         function updateCondonacion(clientId, rowIdx, field, value) {
             let clients = getClients();
             let cIdx = clients.findIndex(c => c.id === clientId);
@@ -2536,19 +2748,19 @@
                 if (currentMoraClientId === clientId) { calculateAndRenderMora(); }
             }
         }
-
+ 
         function renderMoraParamsUI() {
             let tasaAdminAnual = 0;
             if (currentMoraClientId) {
                 const client = getClients().find(c => c.id === currentMoraClientId);
                 tasaAdminAnual = calcularTasaAnual(client);
             }
-
+ 
             document.getElementById('mora-params-body').innerHTML = moraParams.map((p, i) => {
                 let recargo = tasaAdminAnual * (p.val / 100);
                 let nuevaTasa = tasaAdminAnual + recargo;
                 let tasaDiaria = (nuevaTasa / 365).toFixed(4);
-
+ 
                 return `
                 <tr class="hover:bg-slate-100 transition-colors">
                     <td class="p-1"><input type="number" class="w-full text-center border-slate-300 rounded shadow-sm p-1" value="${p.min}" onchange="updateParam('mora', ${i}, 'min', this.value)"></td>
@@ -2558,7 +2770,7 @@
                     <td class="p-1 text-center"><button class="text-red-400 hover:text-red-600" onclick="removeParam('mora', ${i})">X</button></td>
                 </tr>
             `}).join('');
-
+ 
             document.getElementById('cobranza-params-body').innerHTML = cobranzaParams.map((p, i) => `
                 <tr class="hover:bg-slate-100 transition-colors">
                     <td class="p-1"><input type="number" step="0.01" class="w-full text-center border-slate-300 rounded shadow-sm p-1" value="${p.min}" onchange="updateParam('cobranza', ${i}, 'min', this.value)"></td>
@@ -2568,43 +2780,43 @@
                 </tr>
             `).join('');
         }
-
+ 
         function updateParam(type, index, field, value) {
             let val = parseFloat(value) || 0;
             if(type === 'mora') moraParams[index][field] = val;
             else cobranzaParams[index][field] = val;
             renderMoraParamsUI(); calculateAndRenderMora();
         }
-
+ 
         function addParam(type) {
             if(type === 'mora') moraParams.push({min:0, max:0, val:0});
             else cobranzaParams.push({min:0, max:0, val:0});
             renderMoraParamsUI();
         }
-
+ 
         function removeParam(type, index) {
             if(type === 'mora') moraParams.splice(index, 1);
             else cobranzaParams.splice(index, 1);
             renderMoraParamsUI(); calculateAndRenderMora();
         }
-
+ 
         function calculateAndRenderMora() {
             if(!currentMoraClientId) return;
             const client = getClients().find(c => c.id === currentMoraClientId);
             if(!client) return;
-
+ 
             document.getElementById('mora-client-name').innerText = client.nombres;
             document.getElementById('mora-client-plan').innerText = `${client.tipoPlan} - ${client.estadoPlan}`;
             document.getElementById('mora-client-fecha').innerText = client.fechaEntrega ? `Entrega Vehículo: ${formatDate(client.fechaEntrega)}` : 'Sin Entrega de Vehículo (Solo Info)';
-
+ 
             const estadoActivo = client.estadoActivo || 'Activo';
             const spanEstado = document.getElementById('mora-client-estado-activo');
             spanEstado.innerText = estadoActivo;
             spanEstado.className = estadoActivo === 'Activo' ? 'px-2 py-1 rounded-md text-sm font-bold uppercase bg-emerald-100 text-emerald-700' : 'px-2 py-1 rounded-md text-sm font-bold uppercase bg-red-100 text-red-700';
-
+ 
             document.getElementById('mora-frm-grupo').innerText = client.grupoCodigo || '-';
             document.getElementById('mora-frm-plazo').innerText = `${client.plazoPlan || 0} Meses`;
-
+ 
             let tasaAdminAnual = calcularTasaAnual(client);
             let totalCuotasVal = client.valorCuota * client.plazoPlan;
             if (client.tipoPlan === 'Adjudicación Planificada') { totalCuotasVal += (client.valorEntrada || 0); }
@@ -2613,21 +2825,21 @@
             document.getElementById('mora-frm-total-cuotas').innerText = formatCurrency(totalCuotasVal);
             document.getElementById('mora-frm-anios').innerText = (client.plazoPlan / 12).toFixed(2) + ' Años';
             document.getElementById('mora-frm-tasa-admin').innerText = tasaAdminAnual.toFixed(2) + '%';
-
+ 
             const hasEntrega = client.estadoPlan === 'Adjudicado' && client.fechaEntrega;
-
+ 
             const tbody = document.getElementById('mora-results-body');
             tbody.innerHTML = '';
             
             let tMora = 0; let tCob = 0; let tCuotas = 0;
-
+ 
             const fechaCalculoInput = document.getElementById('fecha-calculo-mora').value;
             let todayStr = fechaCalculoInput; 
             if (!todayStr) {
                 const today = new Date();
                 todayStr = today.getFullYear() + "-" + String(today.getMonth() + 1).padStart(2, '0') + "-" + String(today.getDate()).padStart(2, '0');
             }
-
+ 
             client.tableData.forEach((row, rowIdx) => {
                 let salCuota = row.cuotaMensual - (parseFloat(row.abono) || 0);
                 
@@ -2662,10 +2874,10 @@
                             moraVal = originalMora * (1 - (descM / 100));
                             cobVal = originalCob * (1 - (descC / 100));
                         }
-
+ 
                         tMora += moraVal;
                         tCob += cobVal;
-
+ 
                         tbody.innerHTML += `
                             <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100">
                                 <td class="px-2 py-2 text-center text-sm font-bold text-slate-700">${row.numero}</td>
@@ -2674,11 +2886,11 @@
                                 <td class="px-2 py-2 text-right text-sm font-bold text-slate-800">${formatCurrency(salCuota)}</td>
                                 <td class="px-2 py-2 text-right text-sm text-amber-600 font-semibold">${hasEntrega ? formatCurrency(moraVal) : '-'}</td>
                                 <td class="px-1 py-2 text-center no-print">
-                                    ${hasEntrega ? `<input type="number" min="0" max="100" value="${descM}" onblur="updateCondonacion('${client.id}', ${rowIdx}, 'descMora', this.value)" class="w-12 text-center rounded border-emerald-300 text-emerald-700 text-xs p-1 focus:ring-emerald-500 bg-white" title="Descuento Mora %">` : '-'}
+                                   ${hasEntrega ? `<input type="number" min="0" max="100" value="${descM}" onblur="updateCondonacion('${client.id}', ${rowIdx}, 'descMora', this.value)" class="w-12 text-center rounded border-emerald-300 text-emerald-700 text-xs p-1 focus:ring-emerald-500 bg-white" title="Descuento Mora %">` : '-'}
                                 </td>
                                 <td class="px-2 py-2 text-right text-sm text-rose-600 font-semibold">${hasEntrega ? formatCurrency(cobVal) : '-'}</td>
                                 <td class="px-1 py-2 text-center no-print">
-                                    ${hasEntrega ? `<input type="number" min="0" max="100" value="${descC}" onblur="updateCondonacion('${client.id}', ${rowIdx}, 'descCobranza', this.value)" class="w-12 text-center rounded border-emerald-300 text-emerald-700 text-xs p-1 focus:ring-emerald-500 bg-white" title="Descuento Cobranza %">` : '-'}
+                                   ${hasEntrega ? `<input type="number" min="0" max="100" value="${descC}" onblur="updateCondonacion('${client.id}', ${rowIdx}, 'descCobranza', this.value)" class="w-12 text-center rounded border-emerald-300 text-emerald-700 text-xs p-1 focus:ring-emerald-500 bg-white" title="Descuento Cobranza %">` : '-'}
                                 </td>
                                 <td class="px-2 py-2 text-right text-sm font-black text-blue-900">${formatCurrency(salCuota + moraVal + cobVal)}</td>
                             </tr>
@@ -2686,24 +2898,24 @@
                     }
                 }
             });
-
+ 
             if(tbody.innerHTML === '') {
                 tbody.innerHTML = `<tr><td colspan="9" class="px-3 py-6 text-center text-sm text-slate-500">No hay cuotas vencidas para calcular.</td></tr>`;
             }
-
+ 
             document.getElementById('sum-mora-cuotas').innerText = formatCurrency(tCuotas);
             document.getElementById('sum-mora-recargos').innerText = formatCurrency(tMora);
             document.getElementById('sum-mora-cobranzas').innerText = formatCurrency(tCob);
             document.getElementById('sum-mora-total').innerText = formatCurrency(tCuotas + tMora + tCob);
         }
-
+ 
         // --- Lógica Pestaña 5 Reportes Excel (Calculo Dinámico) ---
         function openReportesTab() {
             switchTab('reportes');
             generateReports();
             renderCortesHistory();
         }
-
+ 
         function openEdadesTab() {
             switchTab('edades');
             const d = new Date();
@@ -2718,7 +2930,7 @@
             }
             renderCarteraEdades();
         }
-
+ 
         function getAgeBucket(days) {
             if (days >= 1 && days <= 30) return 'b1_30';
             if (days >= 31 && days <= 60) return 'b31_60';
@@ -2728,7 +2940,7 @@
             if (days >= 151) return 'b151_mas';
             return null;
         }
-
+ 
         function renderCarteraEdades() {
             const clients = getClients();
             
@@ -2741,7 +2953,7 @@
             const desdeStr = document.getElementById('edades-desde').value;
             const hastaStr = document.getElementById('edades-hasta').value;
             if (!hastaStr || !desdeStr) return;
-
+ 
             let execs = {};
             
             function initExec(name) {
@@ -2752,19 +2964,19 @@
                     };
                 }
             }
-
+ 
             clients.forEach(c => {
                 // FILTRO ESTRICTO: Solo clientes con mora comprobada en el Excel original
                 const tieneMoraExcel = (parseInt(c.cuotasVencidasExcel) > 0) || 
                                        (parseFloat(c.valorVencidoExcel) > 0) || 
                                        (c.edadesExcel && parseFloat(c.edadesExcel.asignada) > 0);
                 if (!tieneMoraExcel) return;
-
+ 
                 if (tipoFiltro !== 'Todos' && c.estadoPlan !== tipoFiltro) return;
                 
                 let ejecutivo = c.ejecutivoCartera || 'Sin Asignar';
                 initExec(ejecutivo);
-
+ 
                 let hasExcelAsignada = c.edadesExcel !== undefined && c.edadesExcel !== null;
                 
                 if (hasExcelAsignada) {
@@ -2827,11 +3039,11 @@
                 // Incluir el pago de entrada en el total cobrado si se pagó en el periodo
                 if (c.tipoPlan === 'Adjudicación Planificada' && c.fechaPagoEntrada) {
                      if (c.fechaPagoEntrada >= desdeStr && c.fechaPagoEntrada <= hastaStr) {
-                         execs[ejecutivo].cobrada.total += (parseFloat(c.valorEntrada) || 0);
+                        execs[ejecutivo].cobrada.total += (parseFloat(c.valorEntrada) || 0);
                      }
                 }
             });
-
+ 
             // Generar Totales Globales
             let tAsig = { total: 0, b1_30: 0, b31_60: 0, b61_90: 0, b91_120: 0, b121_150: 0, b151_mas: 0 };
             let tCob = { total: 0, b1_30: 0, b31_60: 0, b61_90: 0, b91_120: 0, b121_150: 0, b151_mas: 0 };
@@ -2842,7 +3054,7 @@
                     tCob[k] += execs[ej].cobrada[k];
                 });
             });
-
+ 
             const tbodyAsig = document.getElementById('edades-asignada-body');
             const tbodyCob = document.getElementById('edades-cobrada-body');
             tbodyAsig.innerHTML = '';
@@ -2850,14 +3062,14 @@
             
             exportDataEdadesAsignada = [];
             exportDataEdadesCobrada = [];
-
+ 
             Object.keys(execs).sort().forEach(ej => {
                 let asig = execs[ej].asignada;
                 let cob = execs[ej].cobrada;
                 
                 let pctAsig = tAsig.total > 0 ? (asig.total / tAsig.total) * 100 : 0;
                 let pctCump = asig.total > 0 ? (cob.total / asig.total) * 100 : 0;
-
+ 
                 exportDataEdadesAsignada.push({
                     "Ejecutivo": ej,
                     "Cartera Asignada": parseFloat(asig.total.toFixed(2)),
@@ -2869,7 +3081,7 @@
                     "> a 151 Días": parseFloat(asig.b151_mas.toFixed(2)),
                     "% Asignado": pctAsig.toFixed(2) + "%"
                 });
-
+ 
                 exportDataEdadesCobrada.push({
                     "Ejecutivo": ej,
                     "Cartera Cobrada": parseFloat(cob.total.toFixed(2)),
@@ -2881,7 +3093,7 @@
                     "> a 151 Días": parseFloat(cob.b151_mas.toFixed(2)),
                     "% Cumplimiento": pctCump.toFixed(2) + "%"
                 });
-
+ 
                 tbodyAsig.innerHTML += `
                     <tr class="hover:bg-blue-50">
                         <td class="border border-slate-300 px-3 py-1 text-left font-bold text-slate-800">${ej}</td>
@@ -2895,7 +3107,7 @@
                         <td class="border border-slate-300 px-3 py-1 text-center font-semibold text-slate-800">${pctAsig.toFixed(2)}%</td>
                     </tr>
                 `;
-
+ 
                 tbodyCob.innerHTML += `
                     <tr class="hover:bg-blue-50">
                         <td class="border border-slate-300 px-3 py-1 text-left font-bold text-slate-800">${ej}</td>
@@ -2910,7 +3122,7 @@
                     </tr>
                 `;
             });
-
+ 
             // Asignada Footer
             document.getElementById('edades-asignada-foot').innerHTML = `
                 <tr>
@@ -2925,11 +3137,11 @@
                     <td class="border border-slate-400 px-3 py-2 text-center font-black">100%</td>
                 </tr>
             `;
-
+ 
             // Cobrada Footer (con dos filas)
             let pctTotalCump = tAsig.total > 0 ? (tCob.total / tAsig.total) * 100 : 0;
             const getPct = (c, a) => a > 0 ? (c / a * 100).toFixed(2) + '%' : '0.00%';
-
+ 
             document.getElementById('edades-cobrada-foot').innerHTML = `
                 <tr>
                     <td class="border border-slate-400 px-3 py-2 text-left font-black">Total General</td>
@@ -2954,7 +3166,7 @@
                 </tr>
             `;
         }
-
+ 
         function exportToExcelEdades() {
             if (exportDataEdadesAsignada.length === 0) {
                 showToast("No hay datos para exportar.", "error");
@@ -2968,7 +3180,7 @@
             XLSX.writeFile(wb, 'Reporte_Cartera_Por_Edades.xlsx');
             showToast("Reporte descargado exitosamente.");
         }
-
+ 
         function generateReports() {
             const clients = getClients();
             
@@ -2976,7 +3188,7 @@
             const dateHastaEl = document.getElementById('filter-date-hasta');
             let dateDesdeStr = dateDesdeEl ? dateDesdeEl.value : '';
             let dateHastaStr = dateHastaEl ? dateHastaEl.value : '';
-
+ 
             function parseToTimestamp(dStr, isEnd) {
                 if (!dStr) return null;
                 let y, m, d;
@@ -2992,10 +3204,10 @@
                 } else return null;
                 return new Date(y, m - 1, d, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd ? 59 : 0).getTime();
             }
-
+ 
             let tsDesde = parseToTimestamp(dateDesdeStr, false);
             let tsHasta = parseToTimestamp(dateHastaStr, true);
-
+ 
             if (!tsDesde && !tsHasta) {
                 const now = new Date();
                 tsDesde = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0).getTime();
@@ -3005,53 +3217,53 @@
             } else if (tsDesde && !tsHasta) {
                 tsHasta = new Date(2099, 11, 31, 23, 59, 59).getTime();
             }
-
+ 
             const fmtD = (ts) => {
                 const x = new Date(ts);
                 return `${String(x.getDate()).padStart(2,'0')}/${String(x.getMonth()+1).padStart(2,'0')}/${x.getFullYear()}`;
             };
-
+ 
             const endD = new Date(tsHasta);
             const limitDateStr = `${endD.getFullYear()}-${String(endD.getMonth()+1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
             const todayDate = new Date();
             const todayStr = `${todayDate.getFullYear()}-${String(todayDate.getMonth()+1).padStart(2, '0')}-${String(todayDate.getDate()).padStart(2, '0')}`;
-
+ 
             const genTitle = document.getElementById('report-general-title');
             if(genTitle) genTitle.innerText = `Reporte General de Clientes (Del ${fmtD(tsDesde)} al ${fmtD(tsHasta)})`;
             
             const ejTitle = document.getElementById('report-ejecutivo-title');
             if(ejTitle) ejTitle.innerText = `Recaudación por Ejecutivo (Del ${fmtD(tsDesde)} al ${fmtD(tsHasta)})`;
-
+ 
             exportDataGeneral = [];
             let reportEjecutivosMap = {};
-
+ 
             const tbodyGen = document.getElementById('report-general-body');
             tbodyGen.innerHTML = '';
-
+ 
             let fEjecutivo = document.getElementById('filter-ejecutivo').value;
             let fEstado = document.getElementById('filter-estado').value;
             let fVencidas = document.getElementById('filter-vencidas').value;
             let fCobradas = document.getElementById('filter-cobradas').value;
-
+ 
             if (clients.length === 0) {
                 tbodyGen.innerHTML = `<tr><td colspan="14" class="px-3 py-6 text-center text-sm text-slate-500">No hay clientes registrados en la base de datos.</td></tr>`;
                 document.getElementById('report-ejecutivos-body').innerHTML = `<tr><td colspan="5" class="px-3 py-6 text-center text-sm text-slate-500">No hay datos para mostrar.</td></tr>`;
                 return;
             }
-
+ 
             function isDateInSelectedRange(dateStr) {
                 const ts = parseToTimestamp(dateStr, false);
                 if (!ts) return false;
                 return ts >= tsDesde && ts <= tsHasta;
             }
-
+ 
             clients.forEach((c, idx) => {
                 // FILTRO ESTRICTO: Solo procesar clientes que tienen mora demostrada en el Excel original
                 const tieneMoraExcel = (parseInt(c.cuotasVencidasExcel) > 0) || 
                                        (parseFloat(c.valorVencidoExcel) > 0) || 
                                        (c.edadesExcel && parseFloat(c.edadesExcel.asignada) > 0);
                 if (!tieneMoraExcel) return;
-
+ 
                 let cuotasVencidas = 0;
                 let valorVencido = 0;
                 let carteraAsigHistorica = 0;
@@ -3059,7 +3271,7 @@
                 let valorCobradoMes = 0;
                 let cuotasPendientes = 0;
                 let valorPendiente = 0;
-
+ 
                 // CÁLCULO DINÁMICO DESDE LA TABLA REAL DEL CLIENTE
                 if (c.tableData && c.tableData.length > 0) {
                     c.tableData.forEach(row => {
@@ -3067,14 +3279,14 @@
                         let abono = parseFloat(row.abono) || 0;
                         let saldoCuota = cuota - abono;
                         if (saldoCuota < 0) saldoCuota = 0; // Seguro contra negativos
-
+ 
                         let isPaidThisMonth = false;
                         if (abono > 0 && isDateInSelectedRange(row.fechaPago)) {
                             isPaidThisMonth = true;
                             valorCobradoMes += abono;
                             cuotasCobradasMes++;
                         }
-
+ 
                         // 1. Cuotas Vencidas (Actuales) - Consideramos vencidas TODAS las cuotas hasta la fecha de corte
                         if (row.vencimiento && row.vencimiento <= limitDateStr) {
                             if (saldoCuota > 0 || isPaidThisMonth) {
@@ -3109,14 +3321,14 @@
                         cuotasVencidas = excelCuotasVencidas;
                     }
                 }
-
+ 
                 // NUEVO: Pendientes es igual a la mora inicial menos lo cobrado en el rango
                 cuotasPendientes = Math.max(0, cuotasVencidas - cuotasCobradasMes);
                 valorPendiente = Math.max(0, valorVencido - valorCobradoMes);
-
+ 
                 let ejecutivo = c.ejecutivoCartera || 'Sin Asignar';
                 let estatusBien = c.fechaEntrega ? 'Con Bien' : 'Sin Bien';
-
+ 
                 // Aplicar Filtros Dinámicos
                 if (fEjecutivo !== 'Todos' && ejecutivo !== fEjecutivo) return;
                 if (fEstado !== 'Todos' && c.estadoPlan !== fEstado) return;
@@ -3128,7 +3340,7 @@
                         if (cuotasVencidas !== parseInt(fVencidas)) return;
                     }
                 }
-
+ 
                 if (fCobradas !== 'Todos') {
                     if (fCobradas === '>5') {
                         if (cuotasCobradasMes <= 5) return;
@@ -3136,7 +3348,7 @@
                         if (cuotasCobradasMes !== parseInt(fCobradas)) return;
                     }
                 }
-
+ 
                 exportDataGeneral.push({
                     "Cliente": c.nombres,
                     "Identificación": String(c.docIdentidad),
@@ -3153,7 +3365,7 @@
                     "Valor Pendiente": parseFloat(valorPendiente.toFixed(2)),
                     "Ejecutivo": ejecutivo
                 });
-
+ 
                 tbodyGen.innerHTML += `
                     <tr class="${idx%2===0?'bg-slate-50':'bg-white'} hover:bg-blue-50 transition-colors">
                         <td class="px-3 py-2 text-left font-medium text-slate-800">${c.nombres}</td>
@@ -3172,7 +3384,7 @@
                         <td class="px-3 py-2 text-left font-bold text-blue-900 bg-blue-50">${ejecutivo}</td>
                     </tr>
                 `;
-
+ 
                 if (!reportEjecutivosMap[ejecutivo]) {
                     reportEjecutivosMap[ejecutivo] = { clientes: 0, recaudadoMes: 0, totalAsignado: 0 };
                 }
@@ -3180,21 +3392,21 @@
                 reportEjecutivosMap[ejecutivo].recaudadoMes += valorCobradoMes;
                 reportEjecutivosMap[ejecutivo].totalAsignado += carteraAsigHistorica;
             });
-
+ 
             if(tbodyGen.innerHTML === '') {
                  tbodyGen.innerHTML = `<tr><td colspan="14" class="px-3 py-6 text-center text-sm text-slate-500">No hay clientes que coincidan con los filtros aplicados.</td></tr>`;
             }
-
+ 
             const tbodyEj = document.getElementById('report-ejecutivos-body');
             tbodyEj.innerHTML = '';
             exportDataEjecutivos = [];
-
+ 
             if(Object.keys(reportEjecutivosMap).length === 0) {
                  tbodyEj.innerHTML = `<tr><td colspan="5" class="px-3 py-6 text-center text-sm text-slate-500">No hay datos de recaudación bajo estos filtros.</td></tr>`;
             }
-
+ 
             let sumClientes = 0, sumAsignado = 0, sumRecaudo = 0, sumSaldo = 0;
-
+ 
             Object.keys(reportEjecutivosMap).sort().forEach(ej => {
                 let data = reportEjecutivosMap[ej];
                 let saldoPorRecaudar = data.totalAsignado - data.recaudadoMes;
@@ -3203,7 +3415,7 @@
                 sumAsignado += data.totalAsignado;
                 sumRecaudo += data.recaudadoMes;
                 sumSaldo += saldoPorRecaudar;
-
+ 
                 exportDataEjecutivos.push({
                     "Ejecutivo de Cartera": ej,
                     "Total Clientes Asignados": data.clientes,
@@ -3211,7 +3423,7 @@
                     "Recaudo (Mes)": parseFloat(data.recaudadoMes.toFixed(2)),
                     "Saldo Por Recaudar": parseFloat(saldoPorRecaudar.toFixed(2))
                 });
-
+ 
                 tbodyEj.innerHTML += `
                     <tr class="hover:bg-slate-50 transition-colors">
                         <td class="px-4 py-3 text-left font-bold text-slate-800">${ej}</td>
@@ -3222,7 +3434,7 @@
                     </tr>
                 `;
             });
-
+ 
             if (Object.keys(reportEjecutivosMap).length > 0) {
                 exportDataEjecutivos.push({
                     "Ejecutivo de Cartera": "TOTAL GENERAL",
@@ -3231,7 +3443,7 @@
                     "Recaudo (Mes)": parseFloat(sumRecaudo.toFixed(2)),
                     "Saldo Por Recaudar": parseFloat(sumSaldo.toFixed(2))
                 });
-
+ 
                 tbodyEj.innerHTML += `
                     <tr class="bg-slate-200 border-t-2 border-slate-300">
                         <td class="px-4 py-3 text-right font-black text-slate-800 uppercase text-xs tracking-wider">Total General</td>
@@ -3243,25 +3455,30 @@
                 `;
             }
         }
-
+ 
         function exportToExcel(type) {
             let dataToExport = type === 'general' ? exportDataGeneral : exportDataEjecutivos;
             let fileName = type === 'general' ? 'Reporte_General_Clientes.xlsx' : 'Reporte_Recaudacion_Ejecutivos.xlsx';
-
+ 
             if (dataToExport.length === 0) {
                 showToast("No hay datos para exportar.", "error");
                 return;
             }
-
+ 
             const ws = XLSX.utils.json_to_sheet(dataToExport);
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "Reportes");
-
+ 
             XLSX.writeFile(wb, fileName);
             showToast("Reporte descargado exitosamente.");
         }
-
+ 
         function getCortes() { 
+            if (window.firebaseInitialized) return window.memCortes;
+            return getCortesLegacy();
+        }
+
+        function getCortesLegacy() {
             let data = localStorage.getItem('aportes_cortes_db');
             if (!data) return [];
             if (data.startsWith('[')) {
@@ -3273,29 +3490,48 @@
             } catch(e) {}
             return [];
         }
-
-        function saveCortes(data) { 
+ 
+        async function saveCortes(data) { 
+            window.memCortes = data;
             try {
                 let json = JSON.stringify(data);
                 localStorage.setItem('aportes_cortes_db', LZString.compressToUTF16(json)); 
             } catch(e) {
-                if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22) {
-                    showToast("Error de capacidad al guardar historial de cortes.", "error");
+                console.warn("Local storage full for cortes.");
+            }
+
+            if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                try {
+                    const cortesPath = `artifacts/${window.appId}/public/data/cortes_cartera`;
+                    for (const corte of data) {
+                         await window.setDoc(window.doc(window.db, cortesPath, corte.id), corte);
+                    }
+                } catch(e) {
+                     console.error("Error saving cortes to Firestore", e);
                 }
             }
         }
 
+        async function deleteCorteFromFirestore(id) {
+             if (window.firebaseInitialized && window.auth && window.auth.currentUser) {
+                 try {
+                    const cortesPath = `artifacts/${window.appId}/public/data/cortes_cartera`;
+                    await window.deleteDoc(window.doc(window.db, cortesPath, id));
+                 } catch(e) {}
+             }
+        }
+ 
         function renderCortesHistory() {
             const tbody = document.getElementById('cortes-history-body');
             if(!tbody) return;
             const cortes = getCortes();
             tbody.innerHTML = '';
-
+ 
             if(cortes.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="px-4 py-6 text-center text-sm text-slate-500">No hay cortes de cartera registrados en el historial.</td></tr>`;
                 return;
             }
-
+ 
             // Ordenar descendentemente para que los meses más recientes salgan primero
             cortes.sort((a,b) => b.id.localeCompare(a.id)).forEach((corte, idx) => {
                 tbody.innerHTML += `
@@ -3315,19 +3551,19 @@
                 `;
             });
         }
-
+ 
         function realizarCorteCartera() {
             const clients = getClients();
             if(clients.length === 0) {
                 showToast("No hay clientes en el sistema para realizar un corte.", "error");
                 return;
             }
-
+ 
             const dateDesdeEl = document.getElementById('filter-date-desde');
             const dateHastaEl = document.getElementById('filter-date-hasta');
             let dateDesdeStr = dateDesdeEl ? dateDesdeEl.value : '';
             let dateHastaStr = dateHastaEl ? dateHastaEl.value : '';
-
+ 
             function parseToTs(dStr, isEnd) {
                 if (!dStr) return null;
                 let y, m, d;
@@ -3343,51 +3579,51 @@
                 } else return null;
                 return new Date(y, m - 1, d, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd ? 59 : 0).getTime();
             }
-
+ 
             let tsDesde = parseToTs(dateDesdeStr, false);
             let tsHasta = parseToTs(dateHastaStr, true);
-
+ 
             if (!tsDesde && !tsHasta) {
                 const now = new Date();
                 tsDesde = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0).getTime();
                 tsHasta = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59).getTime();
             } else if (!tsDesde && tsHasta) { tsDesde = 0; }
             else if (tsDesde && !tsHasta) { tsHasta = new Date(2099, 11, 31, 23, 59, 59).getTime(); }
-
+ 
             const endD = new Date(tsHasta);
             const meses = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
             const mesNombre = `CORTE AL ${String(endD.getDate()).padStart(2,'0')} DE ${meses[endD.getMonth()]} ${endD.getFullYear()}`;
             const cutId = `${endD.getFullYear()}-${String(endD.getMonth()+1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
-
+ 
             let sumClientes = clients.length; 
             let sumAsignado = 0;
             let sumRecaudo = 0;
-
+ 
             function isDateInSelectedRange(dateStr) {
                 const ts = parseToTs(dateStr, false);
                 if (!ts) return false;
                 return ts >= tsDesde && ts <= tsHasta;
             }
-
+ 
             const limitDateStr = `${endD.getFullYear()}-${String(endD.getMonth()+1).padStart(2,'0')}-${String(endD.getDate()).padStart(2,'0')}`;
-
+ 
             clients.forEach(c => {
                 let valorVencido = 0;
                 let valorCobradoMes = 0;
-
+ 
                 if (c.tableData) {
                     c.tableData.forEach(row => {
                         let cuota = parseFloat(row.cuotaMensual) || 0;
                         let abono = parseFloat(row.abono) || 0;
                         let saldoCuota = cuota - abono;
                         if (saldoCuota < 0) saldoCuota = 0;
-
+ 
                         let isPaidThisMonth = false;
                         if (abono > 0 && isDateInSelectedRange(row.fechaPago)) {
                             isPaidThisMonth = true;
                             valorCobradoMes += abono;
                         }
-
+ 
                         if (row.vencimiento && row.vencimiento <= limitDateStr) {
                             if (saldoCuota > 0 || isPaidThisMonth) {
                                 valorVencido += saldoCuota + (isPaidThisMonth ? abono : 0);
@@ -3401,7 +3637,7 @@
                         valorCobradoMes += (parseFloat(c.valorEntrada) || 0);
                     }
                 }
-
+ 
                 // Aseguramos que la Cartera Asignada del corte sea exactamente la del Excel
                 let hasExcelAsignada = c.edadesExcel !== undefined && c.edadesExcel !== null;
                 if (hasExcelAsignada) {
@@ -3413,19 +3649,19 @@
                         valorVencido = excelVencido;
                     }
                 }
-
+ 
                 sumAsignado += valorVencido;
                 sumRecaudo += valorCobradoMes;
             });
-
+ 
             let sumSaldo = sumAsignado - sumRecaudo;
-
+ 
             const confirmMsg = `Se guardará el estatus global: ${mesNombre}\n\nCartera Asignada: ${formatCurrency(sumAsignado)}\nTotal Recaudado: ${formatCurrency(sumRecaudo)}\nSaldo Restante: ${formatCurrency(sumSaldo)}\n\n¿Deseas registrar este corte histórico?`;
-
-            showConfirm(confirmMsg, () => {
+ 
+            showConfirm(confirmMsg, async () => {
                 let cortes = getCortes();
                 let existingIdx = cortes.findIndex(c => c.id === cutId);
-
+ 
                 const newCorte = {
                     id: cutId,
                     mes: mesNombre,
@@ -3435,28 +3671,29 @@
                     recaudado: sumRecaudo,
                     saldo: sumSaldo
                 };
-
+ 
                 if (existingIdx > -1) {
                     cortes[existingIdx] = newCorte;
                 } else {
                     cortes.push(newCorte);
                 }
-
-                saveCortes(cortes);
+ 
+                await saveCortes(cortes);
                 renderCortesHistory();
                 showToast("Corte de cartera guardado exitosamente.");
             });
         }
-
+ 
         function eliminarCorte(id) {
-            showConfirm("¿Eliminar este registro histórico? (No afectará a los clientes, solo borrará la estadística de este mes de la tabla).", () => {
+            showConfirm("¿Eliminar este registro histórico? (No afectará a los clientes, solo borrará la estadística de este mes de la tabla).", async () => {
                 let cortes = getCortes().filter(c => c.id !== id);
-                saveCortes(cortes);
+                await saveCortes(cortes);
+                await deleteCorteFromFirestore(id);
                 renderCortesHistory();
                 showToast("Registro histórico eliminado.");
             });
         }
-
+ 
         // --- Funciones de Respaldo y Recuperación (Exportar/Importar .json) ---
         function exportarSistema() {
             try {
@@ -3485,22 +3722,22 @@
                 showToast("Ocurrió un error al crear el respaldo.", "error");
             }
         }
-
+ 
         function importarSistema(event) {
             const file = event.target.files[0];
             if (!file) return;
-
+ 
             showConfirm("¿Estás seguro de importar este respaldo? Esto reemplazará TODA la información actual del sistema.", () => {
                 const reader = new FileReader();
-                reader.onload = function(e) {
+                reader.onload = async function(e) {
                     try {
                         const backup = JSON.parse(e.target.result);
                         
                         // Validar que sea un archivo de backup válido
                         if (backup.clients !== undefined) {
-                            saveClients(backup.clients);
-                            if (backup.historical) saveBasesHistoricas(backup.historical);
-                            if (backup.cortes) saveCortes(backup.cortes);
+                            await saveClients(backup.clients);
+                            if (backup.historical) await saveBasesHistoricas(backup.historical);
+                            if (backup.cortes) await saveCortes(backup.cortes);
                             
                             // Restaurar logo
                             if (backup.logo) {
@@ -3518,7 +3755,7 @@
                                     moraContainerEl.classList.remove('hidden');
                                 }
                             }
-
+ 
                             // Refrescar interfaces
                             renderDashboard();
                             renderSelectBasesHistoricas();
@@ -3539,7 +3776,7 @@
                 reader.readAsText(file);
             });
         }
-
+ 
         // --- Inicializando App ---
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => {
@@ -3550,7 +3787,7 @@
                 el.classList.remove('border-blue-600', 'text-blue-700');
                 el.classList.add('border-transparent', 'text-gray-500');
             });
-
+ 
             setTimeout(() => {
                 const activeContent = document.getElementById(`tab-${tabId}`);
                 if(activeContent) {
@@ -3558,14 +3795,14 @@
                     setTimeout(() => activeContent.classList.add('active'), 50);
                 }
             }, 150);
-
+ 
             const activeBtn = document.getElementById(`tab-btn-${tabId}`);
             if(activeBtn) {
                 activeBtn.classList.remove('border-transparent', 'text-gray-500');
                 activeBtn.classList.add('border-blue-600', 'text-blue-700');
             }
         }
-
+ 
         function handleImageUpload(e) {
             if (e.target.files[0]) {
                 const reader = new FileReader();
@@ -3585,19 +3822,19 @@
                 reader.readAsDataURL(e.target.files[0]);
             }
         }
-
+ 
         // --- FUNCIONES DE INTELIGENCIA ARTIFICIAL (GEMINI API) ---
         
         // Función principal para contactar a Gemini con Exponential Backoff
         async function callGeminiAPI(prompt, systemPrompt = "Eres un asistente experto.") {
             const apiKey = ""; // Se inyecta automáticamente por el entorno
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-
+ 
             const payload = {
                 contents: [{ parts: [{ text: prompt }] }],
                 systemInstruction: { parts: [{ text: systemPrompt }] }
             };
-
+ 
             const fetchWithBackoff = async (retries = 3, delay = 1000) => {
                 try {
                     const response = await fetch(apiUrl, {
@@ -3622,10 +3859,10 @@
                     return "Ocurrió un error al contactar a la Inteligencia Artificial. Verifica tu conexión.";
                 }
             };
-
+ 
             return await fetchWithBackoff();
         }
-
+ 
         // Función para el Dashboard
         async function analizarCarteraIA() {
             const clients = getClients();
@@ -3633,13 +3870,13 @@
                 showToast("No hay clientes en la base para analizar.", "error");
                 return;
             }
-
+ 
             const panel = document.getElementById('ai-dashboard-summary');
             const content = document.getElementById('ai-dashboard-content');
             
             panel.classList.remove('hidden');
             content.innerHTML = '<div class="flex items-center text-purple-600"><svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> <span>Gemini está analizando la cartera actual...</span></div>';
-
+ 
             let totalMonto = 0;
             let adjudicados = 0;
             let activos = 0;
@@ -3649,20 +3886,20 @@
                 if(c.estadoPlan === 'Adjudicado') adjudicados++;
                 if(c.estadoActivo === 'Activo') activos++;
             });
-
+ 
             const prompt = `Actualmente tengo una base de datos de ${clients.length} clientes. 
             De estos, ${activos} se encuentran en estado 'Activo'. 
             Un total de ${adjudicados} clientes ya han sido 'Adjudicados'.
             El capital total bajo gestión (monto contratado) es de $${totalMonto.toFixed(2)}.
             
             Basado estrictamente en estos números, escribe un análisis ejecutivo de 2 párrafos cortos. El primer párrafo debe resumir objetivamente la salud de la cartera y el segundo párrafo debe dar una recomendación estratégica o motivacional para mi equipo de cobranzas/ventas. No uses asteriscos excesivos ni formato Markdown complejo.`;
-
+ 
             const sysPrompt = "Eres un director financiero experto e Inteligencia Artificial analítica. Das resúmenes ejecutivos precisos y directos.";
             
             const respuesta = await callGeminiAPI(prompt, sysPrompt);
             content.innerText = respuesta;
         }
-
+ 
         // Función para generar mensajes de WhatsApp
         async function generarMensajeCobranza() {
             const clientName = document.getElementById('mora-client-name').innerText;
@@ -3672,15 +3909,15 @@
                 showToast("Primero debes cargar la tabla y calcular la mora del cliente.", "error");
                 return;
             }
-
+ 
             const tone = document.getElementById('ai-tone').value;
             const btn = document.getElementById('btn-generar-ia');
             const textArea = document.getElementById('ai-mensaje-texto');
-
+ 
             btn.disabled = true;
             btn.innerHTML = '<svg class="animate-spin h-4 w-4 mr-2 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Redactando...';
             textArea.value = "Gemini está escribiendo tu mensaje...";
-
+ 
             const prompt = `Escribe un mensaje de WhatsApp de cobranza para el cliente llamado "${clientName}". 
             El tono del mensaje debe ser: ${tone}. 
             El cliente tiene una deuda vencida total calculada en: ${totalDebt}. 
@@ -3692,16 +3929,16 @@
             4. Sé muy conciso, ideal para leerse rápido en un teléfono móvil.
             5. Firma el mensaje como "Departamento de Cobranzas". ¡No dejes campos [entre corchetes]! Si te falta información genérala de forma genérica.
             6. Usa de 2 a 3 emojis sutiles y profesionales (ej: 📅, 🚗, 💡).`;
-
+ 
             const sysPrompt = "Eres un especialista en cobros por WhatsApp. Creas mensajes de cobranza altamente efectivos, profesionales y con una sintaxis perfecta.";
-
+ 
             const respuesta = await callGeminiAPI(prompt, sysPrompt);
             
             textArea.value = respuesta;
             btn.disabled = false;
             btn.innerHTML = 'Generar Texto';
         }
-
+ 
         function copiarMensajeIA() {
             const textArea = document.getElementById('ai-mensaje-texto');
             if(!textArea.value || textArea.value.includes("Gemini está escribiendo")) {
@@ -3716,7 +3953,7 @@
             window.getSelection().removeAllRanges();
             showToast("¡Mensaje copiado al portapapeles!", "success");
         }
-
+ 
         document.addEventListener('DOMContentLoaded', () => {
             // Inicializar configuración de Calendarios (Flatpickr) FORZANDO FORMATO DD/MM/AAAA (d/m/Y)
             const fpConfig = { altInput: true, altFormat: "d/m/Y", dateFormat: "Y-m-d", locale: "es", allowInput: true };
@@ -3726,29 +3963,29 @@
                 altInput: true, altFormat: "d/m/Y", dateFormat: "Y-m-d", locale: "es", allowInput: true,
                 defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
             });
-
+ 
             flatpickr("#edades-hasta", {
                 altInput: true, altFormat: "d/m/Y", dateFormat: "Y-m-d", locale: "es", allowInput: true,
                 defaultDate: new Date()
             });
-
+ 
             flatpickr("#fecha-calculo-mora", {
                 altInput: true, altFormat: "d/m/Y", dateFormat: "Y-m-d", locale: "es", allowInput: true,
                 onChange: function() { calculateAndRenderMora(); }
             });
-
+ 
             flatpickr("#filter-date-desde", {
                 altInput: true, altFormat: "d/m/Y", dateFormat: "Y-m-d", locale: "es", allowInput: true,
                 defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
                 onChange: function() { generateReports(); }
             });
-
+ 
             flatpickr("#filter-date-hasta", {
                 altInput: true, altFormat: "d/m/Y", dateFormat: "Y-m-d", locale: "es", allowInput: true,
                 defaultDate: new Date(),
                 onChange: function() { generateReports(); }
             });
-
+ 
             renderDashboard();
             handlePlanTypeChange();
             handleEstadoPlanChange();
@@ -3762,7 +3999,7 @@
                 execSelect.innerHTML = '<option value="Todos">Todos los Ejecutivos</option>';
                 allExecs.forEach(e => { execSelect.innerHTML += `<option value="${e}">${e}</option>`; });
             }
-
+ 
             const savedLogo = localStorage.getItem('company_logo');
             if (savedLogo) {
                 document.getElementById('statement-logo').src = savedLogo;
@@ -3777,6 +4014,21 @@
             }
             
             renderSelectBasesHistoricas();
+        });
+
+        // Listen for Firebase being ready to re-render with cloud data
+        window.addEventListener('firebase-ready', () => {
+            renderDashboard();
+            renderSelectBasesHistoricas();
+            
+            // Poblar dropdown de ejecutivos si hay clientes desde firebase
+            let clients = getClients();
+            if(clients.length > 0) {
+                let allExecs = [...new Set(clients.map(c => c.ejecutivoCartera || 'Sin Asignar'))].sort();
+                let execSelect = document.getElementById('filter-ejecutivo');
+                execSelect.innerHTML = '<option value="Todos">Todos los Ejecutivos</option>';
+                allExecs.forEach(e => { execSelect.innerHTML += `<option value="${e}">${e}</option>`; });
+            }
         });
     </script>
 </body>
